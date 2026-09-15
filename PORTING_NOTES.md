@@ -2,6 +2,17 @@
 
 Source reference: PDF Editor v0.14.4 Build 29 (Windows).
 
+## v0.1.1 deployment fix
+
+The first GitHub Pages test could display a completely white page when the JavaScript application did not start. The deployment path has been hardened in v0.1.1:
+
+- `index.html` now uses relative project paths (`./src/...`) instead of a root-absolute module path.
+- The stylesheet is linked directly from HTML so direct branch deployment does not fail on a browser CSS import.
+- MuPDF.js 1.28.1 is pinned through an import map and externalized from the Vite bundle.
+- The same source tree can therefore start when Pages serves the branch directly, while GitHub Actions remains the recommended deployment method.
+- A visible loading screen and fatal-startup diagnostics replace the previous blank-page failure mode.
+- The Pages workflow now runs `actions/configure-pages` before artifact upload.
+
 ## Porting approach
 
 The Windows application is not wrapped or executed inside the browser. PackDocFit reimplements its workflow for the web while keeping PDF processing local.

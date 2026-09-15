@@ -1,14 +1,83 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#f5f6f8" />
   <meta name="description" content="PackDocFit — PDF editor on the web. Files stay in your browser." />
   <title>PackDocFit — PDF editor on the web</title>
+
+  <!--
+    Keep the stylesheet in HTML instead of importing CSS from JavaScript.
+    This lets the source tree itself remain usable on GitHub Pages as a
+    fallback even when Pages is configured to deploy directly from a branch.
+  -->
+  <link rel="stylesheet" href="./src/style.css" />
+
+  <!--
+    MuPDF.js is pinned to an exact open-source release. Vite externalizes the
+    module for production, and this import map also lets the unbuilt source run
+    directly on GitHub Pages. PDF files are still processed only in-browser.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "mupdf": "https://cdn.jsdelivr.net/npm/mupdf@1.28.1/dist/mupdf.js"
+    }
+  }
+  </script>
+
+  <style>
+    /* Minimal boot UI so a module/deployment error never becomes a blank page. */
+    .pdf-boot{min-height:100vh;display:grid;place-items:center;padding:28px;background:#f2f4f7;color:#1d2430;font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+    .pdf-boot-card{width:min(560px,100%);padding:28px;border:1px solid #d9dde5;border-radius:14px;background:#fff;box-shadow:0 12px 36px rgba(22,34,54,.08)}
+    .pdf-boot-brand{font-size:22px;font-weight:760;letter-spacing:-.02em}.pdf-boot-sub{margin-top:3px;color:#687184}.pdf-boot-status{margin-top:22px;padding:12px 14px;border-radius:9px;background:#f8f9fb;color:#687184;white-space:pre-wrap;word-break:break-word}
+    .pdf-boot-status.error{background:#fff2f2;color:#a12a2f;border:1px solid #f1cccc}.pdf-boot-links{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.pdf-boot-links a{color:#2e6de6;text-decoration:none;font-weight:650}
+    @media(prefers-color-scheme:dark){.pdf-boot{background:#181b21;color:#eef2f7}.pdf-boot-card{background:#20242c;border-color:#343a45}.pdf-boot-sub{color:#9ea8b8}.pdf-boot-status{background:#272c35;color:#9ea8b8}.pdf-boot-status.error{background:#3a2528;color:#ffb3b7;border-color:#714047}}
+  </style>
 </head>
 <body>
-  <div id="app"></div>
-  <script type="module" src="/src/main.js"></script>
+  <div id="app">
+    <div class="pdf-boot" id="pdfBoot">
+      <div class="pdf-boot-card">
+        <div class="pdf-boot-brand">PackDocFit</div>
+        <div class="pdf-boot-sub">PDF editor on the web</div>
+        <div class="pdf-boot-status" id="pdfBootStatus">PackDocFit을 불러오는 중입니다…</div>
+        <div class="pdf-boot-links">
+          <a href="https://github.com/Bak2ya/PackDocFit">GitHub</a>
+          <a href="https://github.com/Bak2ya/PackDocFit/issues">Report an issue</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__packDocFitReady = false;
+    const showBootError = (message) => {
+      if (window.__packDocFitReady) return;
+      const el = document.getElementById('pdfBootStatus');
+      if (!el) return;
+      el.classList.add('error');
+      el.textContent = 'PackDocFit을 시작하지 못했습니다.\n' + message + '\n\n페이지를 새로고침해도 계속되면 GitHub Issues에 알려주세요.';
+    };
+    window.addEventListener('packdocfitfatal', (event) => {
+      const error = event.detail;
+      showBootError(error?.message || String(error || 'Unknown startup error'));
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      const error = event.reason;
+      showBootError(error?.message || String(error || 'Unhandled module error'));
+    });
+    window.addEventListener('error', (event) => {
+      if (!window.__packDocFitReady && event.message) showBootError(event.message);
+    });
+    setTimeout(() => {
+      if (!window.__packDocFitReady) {
+        showBootError('앱 모듈 로딩 시간이 초과되었습니다. GitHub Pages 배포 설정 또는 외부 모듈 로딩을 확인해주세요.');
+      }
+    }, 12000);
+  </script>
+
+  <script type="module" src="./src/main.js"></script>
 </body>
 </html>
