@@ -374,7 +374,46 @@ body.resizing-layout, body.resizing-layout * { cursor: inherit !important; user-
 .small-button:hover { border-color: var(--line-strong); }
 .small-button.danger { color: var(--danger); }
 .settings-section { margin-top: 14px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 0; }
-.settings-help { margin: 8px 0 0; font-size: 11px; color: var(--muted); line-height: 1.55; }
+.settings-help { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.55; }
+
+/* Settings uses semantic sections and natural-width value lanes instead of stretching controls. */
+.modal.settings-modal { width: min(40rem, calc(100vw - 2rem)); max-height: min(48rem, calc(100vh - 2rem)); }
+.settings-modal .modal-body { padding: 0 18px 4px; }
+.settings-stack { width: 100%; }
+.settings-group { padding: 16px 0 18px; border-top: 1px solid var(--line); }
+.settings-group:first-child { border-top: 0; }
+.settings-group > h3 { margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: 0; text-transform: none; }
+.settings-subheading { margin: 14px 0 6px; font-size: 11px; font-weight: 650; color: var(--muted); }
+.settings-row { display: grid; grid-template-columns: minmax(9.5rem, 1fr) auto; column-gap: 24px; row-gap: 5px; align-items: center; min-height: 36px; font-size: 12px; }
+.settings-row > label { color: var(--text); line-height: 1.35; }
+.settings-row .settings-help { grid-column: 1 / -1; padding-right: 1rem; }
+.settings-control { justify-self: end; display: flex; align-items: center; min-width: 0; }
+.settings-control select, .settings-control input[type="number"], .settings-control input[type="text"], .settings-control input[type="password"] {
+  height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); padding: 0 7px; box-sizing: border-box;
+}
+.settings-value-compact { inline-size: 7.5rem; }
+.settings-value-standard { inline-size: min(14rem, 42vw); }
+.settings-value-wide { inline-size: min(17rem, 48vw); }
+.settings-value-compact > input, .settings-value-standard > select, .settings-value-wide > select, .settings-value-wide > input { width: 100%; min-width: 0; }
+.settings-actions { gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.settings-unit-control { gap: 7px; }
+.settings-unit-control input { width: 4.75rem; min-width: 0; }
+.settings-unit-control span { font-size: 11px; color: var(--muted); }
+.settings-toggle-control { max-width: min(22rem, 55vw); }
+.settings-check { display: flex; align-items: center; gap: 7px; color: var(--text); line-height: 1.35; cursor: pointer; }
+.settings-check input { flex: 0 0 auto; }
+.settings-color { width: 100%; height: 28px; border: 1px solid var(--line); border-radius: 5px; background: transparent; padding: 2px; }
+.settings-range { width: 100%; }
+
+@media (max-width: 600px) {
+  .modal.settings-modal { width: min(34rem, calc(100vw - 1rem)); }
+  .settings-modal .modal-body { padding-inline: 14px; }
+  .settings-row { grid-template-columns: 1fr; gap: 6px; padding: 5px 0; }
+  .settings-control { justify-self: stretch; }
+  .settings-value-compact, .settings-value-standard, .settings-value-wide, .settings-toggle-control { inline-size: 100%; max-width: none; }
+  .settings-control select, .settings-control input[type="password"], .settings-range, .settings-color { width: 100%; }
+  .settings-actions { justify-content: flex-start; }
+}
 
 .toast-host { position: fixed; right: 16px; bottom: 16px; z-index: 1000; display: grid; gap: 8px; }
 .toast { min-width: 240px; max-width: 380px; padding: 10px 12px; border-radius: 9px; background: var(--panel); color: var(--text); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 12px; }

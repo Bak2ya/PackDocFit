@@ -1013,11 +1013,15 @@ export class PackDocFitApp {
 
   renderInspector() { /* Right inspector removed; contextual properties live in dialogs/settings. */ }
 
-  annotationStyleFields() {
-    return `<div class="field-row"><label>${this.t('color')}</label><input type="color" data-style="color" value="${esc(this.annotStyle.color)}"></div>
+  annotationStyleFields(settingsMode=false) {
+    if(!settingsMode) return `<div class="field-row"><label>${this.t('color')}</label><input type="color" data-style="color" value="${esc(this.annotStyle.color)}"></div>
       <div class="field-row"><label>${this.t('opacity')}</label><input type="range" data-style="opacity" min="0.1" max="1" step="0.05" value="${this.annotStyle.opacity}"></div>
       <div class="field-row"><label>${this.t('lineWidth')}</label><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"></div>
       <div class="field-row"><label>${this.t('textSize')}</label><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"></div>`
+    return `<div class="settings-row"><label>${this.t('color')}</label><div class="settings-control settings-value-wide"><input class="settings-color" type="color" data-style="color" value="${esc(this.annotStyle.color)}"></div></div>
+      <div class="settings-row"><label>${this.t('opacity')}</label><div class="settings-control settings-value-wide"><input class="settings-range" type="range" data-style="opacity" min="0.1" max="1" step="0.05" value="${this.annotStyle.opacity}"></div></div>
+      <div class="settings-row"><label>${this.t('lineWidth')}</label><div class="settings-control settings-value-compact"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"></div></div>
+      <div class="settings-row"><label>${this.t('textSize')}</label><div class="settings-control settings-value-compact"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"></div></div>`
   }
 
   openAnnotationProperties() {
@@ -1056,14 +1060,32 @@ export class PackDocFitApp {
     const s=this.settings
     const langOptions=[['ko',this.t('languageKo')],['en',this.t('languageEn')],['ja',this.t('languageJa')],['es',this.t('languageEs')]].map(([v,l])=>`<option value="${v}" ${this.language===v?'selected':''}>${l}</option>`).join('')
     this.modal(this.t('settings'),`
-      <div class="field-row"><label>${this.t('language')}</label><select id="setLanguage">${langOptions}</select></div>
-      <div class="field-row"><label>${this.t('theme')}</label><select id="setTheme"><option value="system" ${s.theme==='system'?'selected':''}>${this.t('system')}</option><option value="light" ${s.theme==='light'?'selected':''}>${this.t('light')}</option><option value="dark" ${s.theme==='dark'?'selected':''}>${this.t('dark')}</option></select></div>
-      <div class="field-row"><label>${this.t('imageImport')}</label><select id="setImageOri"><option value="auto" ${s.imageOrientation==='auto'?'selected':''}>${this.t('keepOrientation')}</option><option value="portrait" ${s.imageOrientation==='portrait'?'selected':''}>${this.t('portraitPage')}</option><option value="landscape" ${s.imageOrientation==='landscape'?'selected':''}>${this.t('landscapePage')}</option></select></div>
-      <div class="field-row"><label>${this.t('exportDpi')}</label><input id="setDpi" type="number" min="72" max="600" step="1" value="${s.exportDpi}"></div>
-      <div class="field-row"><label>${this.t('highlightSetting')}</label><div><label><input id="setTextOnly" type="checkbox" ${this.annotStyle.highlightTextOnly?'checked':''}> ${this.t('preferTextLayer')}</label></div></div>
-      <div class="inspector-section settings-section"><h3>${this.t('annotationDefaults')}</h3>${this.annotationStyleFields()}</div>
-      <div class="inspector-section settings-section"><h3>${this.t('pdfSecurity')}</h3><div class="field-row"><label>${this.t('outputPassword')}</label><input id="setPassword" type="password" value="${esc(this.outputPassword)}" placeholder="${this.t('noPassword')}"></div><p class="settings-help">${this.t('outputPasswordHelp')}</p></div>
-      <div class="inline-actions"><button class="small-button" id="exportSettings">${this.t('exportSettings')}</button><button class="small-button" id="importSettings">${this.t('importSettings')}</button><input type="file" id="settingsFile" accept="application/json,.json" hidden></div>`,
+      <div class="settings-stack">
+        <section class="settings-group">
+          <h3>${this.t('generalSettings')}</h3>
+          <div class="settings-row"><label for="setLanguage">${this.t('language')}</label><div class="settings-control settings-value-standard"><select id="setLanguage">${langOptions}</select></div></div>
+          <div class="settings-row"><label for="setTheme">${this.t('theme')}</label><div class="settings-control settings-value-standard"><select id="setTheme"><option value="system" ${s.theme==='system'?'selected':''}>${this.t('system')}</option><option value="light" ${s.theme==='light'?'selected':''}>${this.t('light')}</option><option value="dark" ${s.theme==='dark'?'selected':''}>${this.t('dark')}</option></select></div></div>
+          <div class="settings-row settings-row-actions"><label>${this.t('settingsManagement')}</label><div class="settings-control settings-actions"><button class="small-button" id="exportSettings">${this.t('exportSettings')}</button><button class="small-button" id="importSettings">${this.t('importSettings')}</button><input type="file" id="settingsFile" accept="application/json,.json" hidden></div><p class="settings-help">${this.t('settingsManagementHelp')}</p></div>
+        </section>
+
+        <section class="settings-group">
+          <h3>${this.t('filesAndExport')}</h3>
+          <div class="settings-row"><label for="setImageOri">${this.t('imageImportOrientation')}</label><div class="settings-control settings-value-wide"><select id="setImageOri"><option value="auto" ${s.imageOrientation==='auto'?'selected':''}>${this.t('keepOrientation')}</option><option value="portrait" ${s.imageOrientation==='portrait'?'selected':''}>${this.t('portraitPage')}</option><option value="landscape" ${s.imageOrientation==='landscape'?'selected':''}>${this.t('landscapePage')}</option></select></div></div>
+          <div class="settings-row settings-row-help"><label for="setDpi">${this.t('imageExportResolution')}</label><div class="settings-control settings-value-compact settings-unit-control"><input id="setDpi" type="number" min="72" max="600" step="1" value="${s.exportDpi}"><span>DPI</span></div><p class="settings-help">${this.t('exportDpiHelp')}</p></div>
+        </section>
+
+        <section class="settings-group">
+          <h3>${this.t('annotations')}</h3>
+          <div class="settings-row settings-row-help"><label for="setTextOnly">${this.t('highlightSetting')}</label><div class="settings-control settings-toggle-control"><label class="settings-check"><input id="setTextOnly" type="checkbox" ${this.annotStyle.highlightTextOnly?'checked':''}><span>${this.t('preferTextLayer')}</span></label></div><p class="settings-help">${this.t('highlightHelp')}</p></div>
+          <div class="settings-subheading">${this.t('annotationDefaults')}</div>
+          ${this.annotationStyleFields(true)}
+        </section>
+
+        <section class="settings-group">
+          <h3>${this.t('pdfSecurity')}</h3>
+          <div class="settings-row settings-row-help"><label for="setPassword">${this.t('outputPassword')}</label><div class="settings-control settings-value-wide"><input id="setPassword" type="password" value="${esc(this.outputPassword)}" placeholder="${this.t('noPassword')}"></div><p class="settings-help">${this.t('outputPasswordHelp')}</p></div>
+        </section>
+      </div>`,
       [{label:this.t('cancel')},{label:this.t('saveButton'),primary:true,onClick:m=>{
         const nextLanguage=$('#setLanguage',m).value
         this.settings.theme=$('#setTheme',m).value;this.settings.imageOrientation=$('#setImageOri',m).value;this.settings.exportDpi=clamp(Number($('#setDpi',m).value)||240,72,600);this.annotStyle.highlightTextOnly=$('#setTextOnly',m).checked;this.outputPassword=$('#setPassword',m).value
@@ -1071,9 +1093,10 @@ export class PackDocFitApp {
         this.settings.annotStyle=this.annotStyle;this.settings.language=nextLanguage;const languageChanged=this.language!==nextLanguage;this.language=nextLanguage;this.saveSettings();this.applyTheme()
         if(languageChanged){this.buildShell();this.updateAll()}else this.updateAll();return true
       }}],m=>{
+        $('.modal',m)?.classList.add('settings-modal')
         $('#exportSettings',m).onclick=()=>downloadBytes(new TextEncoder().encode(JSON.stringify(this.settings,null,2)),'PackDocFit-settings.json','application/json')
         $('#importSettings',m).onclick=()=>$('#settingsFile',m).click()
-        $('#settingsFile',m).onchange=async e=>{try{const obj=JSON.parse(await e.target.files[0].text());this.settings={...this.settings,...obj,annotStyle:{...this.annotStyle,...(obj.annotStyle||{})}};this.annotStyle=this.settings.annotStyle;this.language=this.settings.language||this.language;this.saveSettings();this.applyTheme();this.buildShell();this.updateAll();this.toast(this.t('settingsImported'))}catch(err){this.fail(err)}}
+        $('#settingsFile',m).onchange=async e=>{try{const obj=JSON.parse(await e.target.files[0].text());this.settings={...this.settings,...obj,annotStyle:{...this.annotStyle,...(obj.annotStyle||{})}};this.annotStyle=this.settings.annotStyle;this.language=this.settings.language||this.language;this.saveSettings();this.applyTheme();m.remove();this.buildShell();this.updateAll();this.toast(this.t('settingsImported'))}catch(err){this.fail(err)}}
       })
   }
 

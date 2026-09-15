@@ -1,5 +1,14 @@
 # PackDocFit porting notes
 
+## v0.1.3
+
+- Reworked Settings into a compact, section-based information architecture.
+- Grouped global app options together and moved file/export, annotation, and PDF security options into distinct semantic sections.
+- Moved highlight behavior into the Annotation section.
+- Renamed the ambiguous Export DPI setting to Image export resolution and added visible help explaining that it affects PNG/JPG export only.
+- Added natural-width settings value lanes and a narrower Settings dialog, with a stacked responsive layout for narrow screens.
+- Clarified that importing settings applies immediately.
+
 ## v0.1.2
 
 - Added Korean, English, Japanese and Spanish UI languages. Korean is the default for a fresh install and can be changed in Settings.
