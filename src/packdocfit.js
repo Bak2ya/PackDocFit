@@ -36,6 +36,11 @@ function icon(name) {
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1-2-4-2 1.1a7 7 0 0 0-1.8-1L15 4h-6l-.1 2.1a7 7 0 0 0-1.8 1L5 6l-2 4 2 1a7 7 0 0 0 0 2l-2 1 2 4 2.1-1.1a7 7 0 0 0 1.8 1L9 20h6l.1-2.1a7 7 0 0 0 1.8-1L19 18l2-4-2-1a7 7 0 0 0 .1-1z"/>',
     compare: '<rect x="3" y="5" width="8" height="14"/><rect x="13" y="5" width="8" height="14"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+    mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/>',
+    github: '<path d="M7 8 6 4l4 2a8 8 0 0 1 4 0l4-2-1 4a6 6 0 0 1 2 4c0 4-3 7-7 7s-7-3-7-7a6 6 0 0 1 2-4Z"/><path d="M9 14h.01M15 14h.01M9 19v2M15 19v2"/>',
+    windows: '<path d="M3 5.5 10.5 4v7H3zM12 3.7 21 2v9h-9zM3 12.5h7.5v7L3 18zM12 12.5h9V22l-9-1.7z"/>',
+    help: '<circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 0 1 4.6 1c0 2-2.4 2.1-2.4 4M12 17h.01"/>',
+    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
   }[name] || '<circle cx="12" cy="12" r="8"/>'
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`
 }
@@ -95,6 +100,7 @@ export class PackDocFitApp {
     this.clipboardBytes = null
     this.saveHandle = null
     this.outputPassword = ''
+    this.saveOptionsConfirmed = false
     this.selectedAnnot = null
     this.dragDrawing = null
     this.dragAnnot = null
@@ -337,6 +343,7 @@ export class PackDocFitApp {
     this.clipboardBytes = null
     this.saveHandle = null
     this.outputPassword = ''
+    this.saveOptionsConfirmed = false
     this.selectedAnnot = null
     this.dirty = false
     this.setStatus('New project.')
@@ -434,21 +441,61 @@ export class PackDocFitApp {
 
   async save(forceAs=false) {
     if (!this.pageCount()) return
+    if (forceAs || !this.saveOptionsConfirmed) return this.openSaveDialog(forceAs)
+    return this.performSave(forceAs)
+  }
+
+  async performSave(forceAs=false) {
+    if (!this.pageCount()) return false
     const bytes = this.makePdfBytes()
     const suggested = `${filenameStem(this.pageMeta[0]?.source || 'PackDocFit')}_edited.pdf`
     if (!forceAs && this.saveHandle) {
       const w=await this.saveHandle.createWritable(); await w.write(bytes); await w.close()
-      this.markSaved(); this.setStatus('Saved.'); return
+      this.markSaved(); this.setStatus('Saved.'); return true
     }
     if ('showSaveFilePicker' in window) {
       try {
         const handle=await window.showSaveFilePicker({ suggestedName:suggested, types:[{description:'PDF document',accept:{'application/pdf':['.pdf']}}] })
         const w=await handle.createWritable(); await w.write(bytes); await w.close(); this.saveHandle=handle
-        this.markSaved(); this.setStatus('Saved.'); return
-      } catch (e) { if (e?.name==='AbortError') return; throw e }
+        this.markSaved(); this.setStatus('Saved.'); return true
+      } catch (e) { if (e?.name==='AbortError') return false; throw e }
     }
     downloadBytes(bytes,suggested,'application/pdf')
-    this.markSaved(); this.setStatus('PDF downloaded.')
+    this.markSaved(); this.setStatus('PDF downloaded.'); return true
+  }
+
+  openSaveDialog(forceAs=false) {
+    const protectedNow=Boolean(this.outputPassword)
+    this.modal(this.t('savePdfTitle'),`
+      <div class="save-options">
+        <section class="settings-group save-security-group">
+          <h3>${this.t('pdfSecurity')}</h3>
+          <div class="settings-row settings-row-help">
+            <label for="saveProtect">${this.t('passwordProtection')}</label>
+            <div class="settings-control settings-toggle-control"><label class="settings-check"><input id="saveProtect" type="checkbox" ${protectedNow?'checked':''}><span>${this.t('setPasswordForPdf')}</span></label></div>
+            <p class="settings-help">${this.t('saveSecurityHelp')}</p>
+          </div>
+          <div id="savePasswordFields" ${protectedNow?'':'hidden'}>
+            <div class="settings-row"><label for="savePassword">${this.t('password')}</label><div class="settings-control settings-value-standard"><input id="savePassword" type="password" value="${esc(this.outputPassword)}" autocomplete="new-password"></div></div>
+            <div class="settings-row"><label for="savePasswordConfirm">${this.t('confirmPassword')}</label><div class="settings-control settings-value-standard"><input id="savePasswordConfirm" type="password" value="${esc(this.outputPassword)}" autocomplete="new-password"></div></div>
+          </div>
+        </section>
+      </div>`,
+      [{label:this.t('cancel')},{label:forceAs?this.t('saveAsAction'):this.t('saveButton'),primary:true,onClick:async m=>{
+        const protect=$('#saveProtect',m).checked
+        const pw=protect?$('#savePassword',m).value:''
+        const confirmPw=protect?$('#savePasswordConfirm',m).value:''
+        if(protect && !pw){this.toast(this.t('passwordEmpty'),true);return false}
+        if(protect && pw!==confirmPw){this.toast(this.t('passwordMismatch'),true);return false}
+        this.outputPassword=pw
+        this.saveOptionsConfirmed=true
+        const ok=await this.performSave(forceAs)
+        return ok
+      }}],m=>{
+        $('.modal',m)?.classList.add('save-modal')
+        const toggle=()=>{$('#savePasswordFields',m).hidden=!$('#saveProtect',m).checked}
+        $('#saveProtect',m).addEventListener('change',toggle);toggle()
+      })
   }
 
   makePdfBytes({ decrypt=false }={}) {
@@ -1014,14 +1061,30 @@ export class PackDocFitApp {
   renderInspector() { /* Right inspector removed; contextual properties live in dialogs/settings. */ }
 
   annotationStyleFields(settingsMode=false) {
-    if(!settingsMode) return `<div class="field-row"><label>${this.t('color')}</label><input type="color" data-style="color" value="${esc(this.annotStyle.color)}"></div>
-      <div class="field-row"><label>${this.t('opacity')}</label><input type="range" data-style="opacity" min="0.1" max="1" step="0.05" value="${this.annotStyle.opacity}"></div>
-      <div class="field-row"><label>${this.t('lineWidth')}</label><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"></div>
-      <div class="field-row"><label>${this.t('textSize')}</label><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"></div>`
-    return `<div class="settings-row"><label>${this.t('color')}</label><div class="settings-control settings-value-wide"><input class="settings-color" type="color" data-style="color" value="${esc(this.annotStyle.color)}"></div></div>
-      <div class="settings-row"><label>${this.t('opacity')}</label><div class="settings-control settings-value-wide"><input class="settings-range" type="range" data-style="opacity" min="0.1" max="1" step="0.05" value="${this.annotStyle.opacity}"></div></div>
-      <div class="settings-row"><label>${this.t('lineWidth')}</label><div class="settings-control settings-value-compact"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"></div></div>
-      <div class="settings-row"><label>${this.t('textSize')}</label><div class="settings-control settings-value-compact"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"></div></div>`
+    const hex=String(this.annotStyle.color||'#ffcc33').toUpperCase()
+    const pct=Math.round(clamp(Number(this.annotStyle.opacity)||0,0,1)*100)
+    if(!settingsMode) return `<div class="field-row"><label>${this.t('color')}</label><div class="style-color-control"><input type="color" data-style="color" value="${esc(this.annotStyle.color)}"><input class="style-hex" type="text" data-style-peer="colorHex" value="${esc(hex)}" maxlength="7" spellcheck="false"></div></div>
+      <div class="field-row"><label>${this.t('opacity')}</label><div class="style-range-control"><input type="range" data-style="opacity" min="0" max="1" step="0.01" value="${this.annotStyle.opacity}"><span class="style-number-unit"><input type="number" data-style-peer="opacityPercent" min="0" max="100" step="1" value="${pct}"><span>%</span></span></div></div>
+      <div class="field-row"><label>${this.t('lineWidth')}</label><span class="style-number-unit"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"><span>pt</span></span></div>
+      <div class="field-row"><label>${this.t('textSize')}</label><span class="style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></span></div>`
+    return `<div class="settings-row"><label>${this.t('color')}</label><div class="settings-control settings-value-wide style-color-control"><input class="settings-color" type="color" data-style="color" value="${esc(this.annotStyle.color)}"><input class="style-hex" type="text" data-style-peer="colorHex" value="${esc(hex)}" maxlength="7" spellcheck="false"></div></div>
+      <div class="settings-row"><label>${this.t('opacity')}</label><div class="settings-control settings-value-wide style-range-control"><input class="settings-range" type="range" data-style="opacity" min="0" max="1" step="0.01" value="${this.annotStyle.opacity}"><span class="style-number-unit"><input type="number" data-style-peer="opacityPercent" min="0" max="100" step="1" value="${pct}"><span>%</span></span></div></div>
+      <div class="settings-row"><label>${this.t('lineWidth')}</label><div class="settings-control settings-value-compact style-number-unit"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"><span>pt</span></div></div>
+      <div class="settings-row"><label>${this.t('textSize')}</label><div class="settings-control settings-value-compact style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></div></div>`
+  }
+
+  wireAnnotationStyleFields(root) {
+    const color=$('[data-style="color"]',root), hex=$('[data-style-peer="colorHex"]',root)
+    if(color&&hex){
+      color.addEventListener('input',()=>{hex.value=String(color.value).toUpperCase()})
+      const applyHex=()=>{let v=hex.value.trim();if(!v.startsWith('#'))v=`#${v}`;if(/^#[0-9a-f]{6}$/i.test(v)){color.value=v;hex.value=v.toUpperCase()}}
+      hex.addEventListener('input',applyHex);hex.addEventListener('change',applyHex)
+    }
+    const opacity=$('[data-style="opacity"]',root), percent=$('[data-style-peer="opacityPercent"]',root)
+    if(opacity&&percent){
+      opacity.addEventListener('input',()=>{percent.value=String(Math.round(Number(opacity.value)*100))})
+      percent.addEventListener('input',()=>{opacity.value=String(clamp((Number(percent.value)||0)/100,0,1))})
+    }
   }
 
   openAnnotationProperties() {
@@ -1033,7 +1096,7 @@ export class PackDocFitApp {
       [{label:this.t('cancel')},{label:this.t('delete'),onClick:()=>{this.deleteSelectedAnnotation();return true}},{label:this.t('apply'),primary:true,onClick:m=>{
         $$('[data-style]',m).forEach(inp=>{const k=inp.dataset.style;this.annotStyle[k]=inp.type==='range'||inp.type==='number'?Number(inp.value):inp.type==='checkbox'?inp.checked:inp.value})
         this.settings.annotStyle=this.annotStyle;this.saveSettings();this.updateSelectedAnnotationStyle();return true
-      }}])
+      }}],m=>this.wireAnnotationStyleFields(m))
   }
 
   openFitDialog() {
@@ -1059,19 +1122,20 @@ export class PackDocFitApp {
   openSettings() {
     const s=this.settings
     const langOptions=[['ko',this.t('languageKo')],['en',this.t('languageEn')],['ja',this.t('languageJa')],['es',this.t('languageEs')]].map(([v,l])=>`<option value="${v}" ${this.language===v?'selected':''}>${l}</option>`).join('')
+    const inferredQuality=s.exportQuality || (Number(s.exportDpi)===120?'low':Number(s.exportDpi)===360?'high':Number(s.exportDpi)===240?'normal':'custom')
+    const qualityOptions=[['low',this.t('qualityLow')],['normal',this.t('qualityNormal')],['high',this.t('qualityHigh')],['custom',this.t('qualityCustom')]].map(([v,l])=>`<option value="${v}" ${inferredQuality===v?'selected':''}>${l}</option>`).join('')
     this.modal(this.t('settings'),`
       <div class="settings-stack">
         <section class="settings-group">
           <h3>${this.t('generalSettings')}</h3>
           <div class="settings-row"><label for="setLanguage">${this.t('language')}</label><div class="settings-control settings-value-standard"><select id="setLanguage">${langOptions}</select></div></div>
           <div class="settings-row"><label for="setTheme">${this.t('theme')}</label><div class="settings-control settings-value-standard"><select id="setTheme"><option value="system" ${s.theme==='system'?'selected':''}>${this.t('system')}</option><option value="light" ${s.theme==='light'?'selected':''}>${this.t('light')}</option><option value="dark" ${s.theme==='dark'?'selected':''}>${this.t('dark')}</option></select></div></div>
-          <div class="settings-row settings-row-actions"><label>${this.t('settingsManagement')}</label><div class="settings-control settings-actions"><button class="small-button" id="exportSettings">${this.t('exportSettings')}</button><button class="small-button" id="importSettings">${this.t('importSettings')}</button><input type="file" id="settingsFile" accept="application/json,.json" hidden></div><p class="settings-help">${this.t('settingsManagementHelp')}</p></div>
         </section>
 
         <section class="settings-group">
           <h3>${this.t('filesAndExport')}</h3>
           <div class="settings-row"><label for="setImageOri">${this.t('imageImportOrientation')}</label><div class="settings-control settings-value-wide"><select id="setImageOri"><option value="auto" ${s.imageOrientation==='auto'?'selected':''}>${this.t('keepOrientation')}</option><option value="portrait" ${s.imageOrientation==='portrait'?'selected':''}>${this.t('portraitPage')}</option><option value="landscape" ${s.imageOrientation==='landscape'?'selected':''}>${this.t('landscapePage')}</option></select></div></div>
-          <div class="settings-row settings-row-help"><label for="setDpi">${this.t('imageExportResolution')}</label><div class="settings-control settings-value-compact settings-unit-control"><input id="setDpi" type="number" min="72" max="600" step="1" value="${s.exportDpi}"><span>DPI</span></div><p class="settings-help">${this.t('exportDpiHelp')}</p></div>
+          <div class="settings-row settings-row-help"><label for="setExportQuality">${this.t('imageExportQuality')}</label><div class="settings-control export-quality-control"><select id="setExportQuality">${qualityOptions}</select><span class="settings-unit-control"><input id="setDpi" type="number" min="72" max="600" step="1" value="${s.exportDpi||240}"><span>DPI</span></span></div><p class="settings-help">${this.t('exportQualityHelp')}</p></div>
         </section>
 
         <section class="settings-group">
@@ -1082,18 +1146,27 @@ export class PackDocFitApp {
         </section>
 
         <section class="settings-group">
-          <h3>${this.t('pdfSecurity')}</h3>
-          <div class="settings-row settings-row-help"><label for="setPassword">${this.t('outputPassword')}</label><div class="settings-control settings-value-wide"><input id="setPassword" type="password" value="${esc(this.outputPassword)}" placeholder="${this.t('noPassword')}"></div><p class="settings-help">${this.t('outputPasswordHelp')}</p></div>
+          <h3>${this.t('settingsManagement')}</h3>
+          <div class="settings-row settings-row-actions"><label>${this.t('settingsBackupRestore')}</label><div class="settings-control settings-actions"><button class="small-button" id="exportSettings">${this.t('exportSettings')}</button><button class="small-button" id="importSettings">${this.t('importSettings')}</button><input type="file" id="settingsFile" accept="application/json,.json" hidden></div><p class="settings-help">${this.t('settingsManagementHelp')}</p></div>
         </section>
       </div>`,
       [{label:this.t('cancel')},{label:this.t('saveButton'),primary:true,onClick:m=>{
         const nextLanguage=$('#setLanguage',m).value
-        this.settings.theme=$('#setTheme',m).value;this.settings.imageOrientation=$('#setImageOri',m).value;this.settings.exportDpi=clamp(Number($('#setDpi',m).value)||240,72,600);this.annotStyle.highlightTextOnly=$('#setTextOnly',m).checked;this.outputPassword=$('#setPassword',m).value
+        this.settings.theme=$('#setTheme',m).value
+        this.settings.imageOrientation=$('#setImageOri',m).value
+        this.settings.exportQuality=$('#setExportQuality',m).value
+        this.settings.exportDpi=clamp(Number($('#setDpi',m).value)||240,72,600)
+        this.annotStyle.highlightTextOnly=$('#setTextOnly',m).checked
         $$('[data-style]',m).forEach(inp=>{const k=inp.dataset.style;this.annotStyle[k]=inp.type==='range'||inp.type==='number'?Number(inp.value):inp.type==='checkbox'?inp.checked:inp.value})
         this.settings.annotStyle=this.annotStyle;this.settings.language=nextLanguage;const languageChanged=this.language!==nextLanguage;this.language=nextLanguage;this.saveSettings();this.applyTheme()
         if(languageChanged){this.buildShell();this.updateAll()}else this.updateAll();return true
       }}],m=>{
         $('.modal',m)?.classList.add('settings-modal')
+        this.wireAnnotationStyleFields(m)
+        const quality=$('#setExportQuality',m), dpi=$('#setDpi',m)
+        const presets={low:120,normal:240,high:360}
+        const syncQuality=()=>{const v=quality.value;if(v==='custom'){dpi.readOnly=false;dpi.removeAttribute('aria-readonly')}else{dpi.value=String(presets[v]);dpi.readOnly=true;dpi.setAttribute('aria-readonly','true')}}
+        quality.addEventListener('change',syncQuality);syncQuality()
         $('#exportSettings',m).onclick=()=>downloadBytes(new TextEncoder().encode(JSON.stringify(this.settings,null,2)),'PackDocFit-settings.json','application/json')
         $('#importSettings',m).onclick=()=>$('#settingsFile',m).click()
         $('#settingsFile',m).onchange=async e=>{try{const obj=JSON.parse(await e.target.files[0].text());this.settings={...this.settings,...obj,annotStyle:{...this.annotStyle,...(obj.annotStyle||{})}};this.annotStyle=this.settings.annotStyle;this.language=this.settings.language||this.language;this.saveSettings();this.applyTheme();m.remove();this.buildShell();this.updateAll();this.toast(this.t('settingsImported'))}catch(err){this.fail(err)}}
@@ -1101,7 +1174,42 @@ export class PackDocFitApp {
   }
 
   openAbout() {
-    this.modal(this.t('about'),`<div style="text-align:center;padding:12px 8px 22px"><img src="./assets/app_icon.png" alt="PackDocFit" style="width:72px;height:72px;object-fit:contain;margin-bottom:10px"><h2 style="margin:0 0 4px">PackDocFit</h2><div style="color:var(--muted);font-size:12px">${this.t('appSubtitle')}</div><p style="max-width:520px;margin:18px auto 0;font-size:12px;line-height:1.65;color:var(--muted)">${this.t('aboutBody')}</p><p style="font-size:11px;color:var(--muted)">GNU AGPL-3.0</p></div>`,[{label:this.t('close')}])
+    const version='0.1.4'
+    this.modal(this.t('about'),`<div class="about-panel">
+      <img class="about-app-icon" src="./assets/app_icon.png" alt="PackDocFit">
+      <h2>PackDocFit</h2>
+      <div class="about-subtitle">${this.t('appSubtitle')} · v${version}</div>
+      <p class="about-description">${this.t('aboutBody')}</p>
+      <div class="about-actions">
+        <button class="about-action" data-about-action="mail">${icon('mail')}<span>${this.t('contactDeveloper')}</span></button>
+        <button class="about-action" data-about-action="github">${icon('github')}<span>${this.t('viewOnGithub')}</span></button>
+        <button class="about-action" data-about-action="windows">${icon('windows')}<span>${this.t('downloadWindows')}</span></button>
+        <button class="about-action" data-about-action="help">${icon('help')}<span>${this.t('usageGuide')}</span></button>
+      </div>
+      <p class="about-license">GNU AGPL-3.0</p>
+    </div>`,[{label:this.t('close')}],m=>{
+      $('.modal',m)?.classList.add('about-modal')
+      $('[data-about-action="mail"]',m).onclick=()=>{location.href='mailto:creative2ya@gmail.com?subject=PackDocFit%20feedback'}
+      $('[data-about-action="github"]',m).onclick=()=>window.open('https://github.com/Bak2ya/PackDocFit','_blank','noopener,noreferrer')
+      $('[data-about-action="windows"]',m).onclick=()=>window.open('https://github.com/Bak2ya/PackDocFit/releases','_blank','noopener,noreferrer')
+      $('[data-about-action="help"]',m).onclick=()=>this.openHelp()
+    })
+  }
+
+  openHelp() {
+    const mod=/Mac|iPhone|iPad|iPod/i.test(navigator.platform||navigator.userAgent)?'⌘':'Ctrl'
+    const shortcuts=[
+      [`${mod}+N`,this.t('newProject')],[`${mod}+O`,this.t('addFiles')],[`${mod}+S`,this.t('save')],[`${mod}+Shift+S`,this.t('saveAs')],
+      [`${mod}+Z`,this.t('undo')],[`${mod}+Shift+Z / ${mod}+Y`,this.t('redo')],[`${mod}+A`,this.t('selectAllPages')],[`${mod}+C`,this.t('copyPages')],
+      [`${mod}+X`,this.t('cutPages')],[`${mod}+V`,this.t('pastePages')],[`${mod}+0`,this.t('single')],['Delete / Backspace',this.t('deletePages')],
+      ['Esc',this.t('cancelCurrentAction')],['← / Page Up',this.t('previousPage')],['→ / Page Down',this.t('nextPage')]
+    ]
+    const rows=shortcuts.map(([key,label])=>`<tr><td><kbd>${esc(key)}</kbd></td><td>${esc(label)}</td></tr>`).join('')
+    this.modal(this.t('usageGuide'),`<div class="help-panel">
+      <section><h3>${this.t('quickStart')}</h3><ol><li>${this.t('quickStart1')}</li><li>${this.t('quickStart2')}</li><li>${this.t('quickStart3')}</li></ol></section>
+      <section><h3>${this.t('whatYouCanDo')}</h3><ul><li>${this.t('helpFeaturePages')}</li><li>${this.t('helpFeatureLayout')}</li><li>${this.t('helpFeatureAnnotations')}</li><li>${this.t('helpFeatureExport')}</li><li>${this.t('helpFeatureCompare')}</li><li>${this.t('helpFeatureSecurity')}</li></ul></section>
+      <section><h3>${this.t('shortcuts')}</h3><div class="shortcut-scroll"><table class="shortcut-table"><tbody>${rows}</tbody></table></div></section>
+    </div>`,[{label:this.t('close')}],m=>$('.modal',m)?.classList.add('help-modal'))
   }
 
   openMenu(kind,anchor) {
@@ -1111,7 +1219,7 @@ export class PackDocFitApp {
       page:[[this.t('delete'),'delete'],[this.t('rotateRight'),'rotateR'],[this.t('rotateLeft'),'rotateL'],[this.t('rotate180'),'rotate180'],[this.t('fitResize'),'fit']],
       view:[[this.t('continuous'),'continuous'],[this.t('single'),'single'],[this.t('zoomIn'),'zoomIn'],[this.t('zoomOut'),'zoomOut']],
       compare:[[this.t('sideBySide'),'compareH'],[this.t('vertical'),'compareV'],[this.t('overlay'),'compareO']],
-      settings:[[this.t('settings'),'settings'],[this.t('about'),'about']],
+      settings:[[this.t('settings'),'settings'],[this.t('usageGuide'),'help'],[this.t('about'),'about']],
     }
     const items=menus[kind]||[]; const r=anchor.getBoundingClientRect(); const pop=document.createElement('div');pop.style.cssText=`position:fixed;left:${r.left}px;top:${r.bottom+3}px;z-index:800;min-width:190px;padding:5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)`
     pop.innerHTML=items.map(([l,a])=>`<button data-pop="${a}" style="display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--text);padding:7px 9px;border-radius:5px;cursor:pointer;font-size:12px">${esc(l)}</button>`).join('')
@@ -1120,7 +1228,7 @@ export class PackDocFitApp {
   }
 
   async menuAction(a) {
-    const map={new:()=>this.newProject(true),open:()=>this.els.fileInput.click(),save:()=>this.save(false),saveAs:()=>this.save(true),extract:()=>this.extractSelected(),exportPng:()=>this.exportSelectedImage('png'),exportJpg:()=>this.exportSelectedImage('jpg'),undo:()=>this.undo(),redo:()=>this.redo(),copy:()=>this.copyPages(false),cut:()=>this.copyPages(true),paste:()=>this.pastePages(),selectAll:()=>{this.selected=new Set(Array.from({length:this.pageCount()},(_,i)=>i));this.updateAll()},delete:()=>this.deleteSelectedPages(),rotateR:()=>this.rotateSelected(90),rotateL:()=>this.rotateSelected(-90),rotate180:()=>this.rotateSelected(180),fit:()=>this.openFitDialog(),continuous:()=>this.setViewMode('continuous'),single:()=>this.setViewMode('single'),zoomIn:()=>{this.zoom=clamp(this.zoom*1.15,.25,4);this.renderStage()},zoomOut:()=>{this.zoom=clamp(this.zoom*.87,.25,4);this.renderStage()},compareH:()=>this.openCompare('horizontal'),compareV:()=>this.openCompare('vertical'),compareO:()=>this.openCompare('overlay'),settings:()=>this.openSettings(),about:()=>this.openAbout(),annotationProps:()=>this.openAnnotationProperties()};await map[a]?.()
+    const map={new:()=>this.newProject(true),open:()=>this.els.fileInput.click(),save:()=>this.save(false),saveAs:()=>this.save(true),extract:()=>this.extractSelected(),exportPng:()=>this.exportSelectedImage('png'),exportJpg:()=>this.exportSelectedImage('jpg'),undo:()=>this.undo(),redo:()=>this.redo(),copy:()=>this.copyPages(false),cut:()=>this.copyPages(true),paste:()=>this.pastePages(),selectAll:()=>{this.selected=new Set(Array.from({length:this.pageCount()},(_,i)=>i));this.updateAll()},delete:()=>this.deleteSelectedPages(),rotateR:()=>this.rotateSelected(90),rotateL:()=>this.rotateSelected(-90),rotate180:()=>this.rotateSelected(180),fit:()=>this.openFitDialog(),continuous:()=>this.setViewMode('continuous'),single:()=>this.setViewMode('single'),zoomIn:()=>{this.zoom=clamp(this.zoom*1.15,.25,4);this.renderStage()},zoomOut:()=>{this.zoom=clamp(this.zoom*.87,.25,4);this.renderStage()},compareH:()=>this.openCompare('horizontal'),compareV:()=>this.openCompare('vertical'),compareO:()=>this.openCompare('overlay'),settings:()=>this.openSettings(),help:()=>this.openHelp(),about:()=>this.openAbout(),annotationProps:()=>this.openAnnotationProperties()};await map[a]?.()
   }
 
   onKeyDown(e) {
@@ -1153,8 +1261,12 @@ export class PackDocFitApp {
   }
 
   loadSettings() {
-    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportDpi:240,zoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true}}
-    try{const x=JSON.parse(localStorage.getItem('packdocfit-settings')||'{}');return{...defaults,...x,annotStyle:{...defaults.annotStyle,...(x.annotStyle||{})}}}catch{return defaults}
+    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportQuality:'normal',exportDpi:240,zoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true}}
+    try{
+      const x=JSON.parse(localStorage.getItem('packdocfit-settings')||'{}')
+      if(!x.exportQuality && Number.isFinite(Number(x.exportDpi))){const dpi=Number(x.exportDpi);x.exportQuality=dpi===120?'low':dpi===240?'normal':dpi===360?'high':'custom'}
+      return{...defaults,...x,annotStyle:{...defaults.annotStyle,...(x.annotStyle||{})}}
+    }catch{return defaults}
   }
   saveSettings(){localStorage.setItem('packdocfit-settings',JSON.stringify(this.settings))}
   applyTheme(){const t=this.settings.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):this.settings.theme;document.documentElement.dataset.theme=t}

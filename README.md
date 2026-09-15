@@ -27,14 +27,15 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 - 주석 이동, 크기 변경, 속성 변경 및 삭제
 - Undo / Redo
 - 암호가 설정된 PDF 열기
-- AES-256 암호를 적용한 PDF 저장
-- 페이지를 PNG/JPG 이미지로 내보내기
+- PDF 저장 시 필요할 때 AES-256 암호 설정
+- 페이지를 PNG/JPG 이미지로 내보내기 (낮게 / 일반 / 고품질 / 사용자 지정 DPI)
 - 선택한 페이지 비교
 - SHA-256을 이용한 중복 파일 확인
 - 한국어 / 영어 / 일본어 / 스페인어 UI
 - 라이트 / 다크 / 시스템 테마
 - 파일 영역 ↔ 페이지 영역, 왼쪽 패널 ↔ 미리보기 영역 크기 드래그 조절
 - 설정 가져오기 / 내보내기
+- 정보창에서 개발자 문의, GitHub, Windows 다운로드, 간단 사용법 확인
 
 ### 웹 버전 바로 사용하기
 
@@ -50,11 +51,22 @@ PackDocFit의 기반이 된 기존 Windows PDF Editor도 함께 배포할 예정
 
 Windows 버전은 브라우저 버전과 달리 데스크톱 환경에서 직접 실행되며, 대용량 PDF나 네이티브 파일 작업이 필요한 경우 유용할 수 있습니다.
 
-Windows 실행 파일은 이 저장소의 **GitHub Releases**에서 배포합니다.
+Windows 실행 파일은 이 저장소의 **GitHub Releases**에서 배포합니다. 웹앱의 **PackDocFit 정보 → Windows 버전 다운로드** 버튼에서도 같은 Releases 페이지로 바로 이동할 수 있습니다.
 
 **https://github.com/Bak2ya/PackDocFit/releases**
 
 > Windows 실행 파일이 아직 Releases에 올라오지 않았다면 준비 중인 상태입니다. 기존 Windows 프로그램을 새 배포 파일로 올린 뒤 이 안내를 그대로 사용할 수 있습니다.
+
+### 정보 / 사용법
+
+앱의 정보창에서는 다음 항목을 바로 열 수 있습니다.
+
+- 문의 메일 보내기: `creative2ya@gmail.com`
+- GitHub에서 보기
+- Windows 버전 다운로드
+- 사용법: 빠른 시작, 주요 기능, 현재 지원되는 단축키
+
+PDF 암호는 앱 전역 설정에 저장하지 않습니다. PDF를 저장하거나 다른 이름으로 저장할 때 해당 저장 작업에서 필요할 경우 설정합니다.
 
 ### 개인정보 / 파일 처리
 
@@ -110,14 +122,15 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 - Move, resize, restyle and delete annotations
 - Undo / redo
 - Open password-protected PDFs
-- Save PDFs with AES-256 password encryption
-- Export pages as PNG or JPG
+- Optionally apply AES-256 password encryption when saving a PDF
+- Export pages as PNG or JPG with Low / Normal / High / Custom DPI quality choices
 - Compare selected pages
 - Duplicate-file detection using SHA-256
 - Korean / English / Japanese / Spanish UI
 - Light / dark / system theme
 - Resizable Files / Pages split and resizable sidebar / preview workspace
 - Settings import and export
+- About window with developer email, GitHub, Windows download, and an in-app usage guide
 
 ### Open the web app
 
@@ -133,11 +146,22 @@ The existing Windows PDF Editor that PackDocFit is based on will also be distrib
 
 The desktop build can be useful for users who prefer a native Windows application or work with large local documents.
 
-Windows builds are distributed through **GitHub Releases**:
+Windows builds are distributed through **GitHub Releases**. The same page is available from **About PackDocFit → Download Windows version** in the web app.
 
 **https://github.com/Bak2ya/PackDocFit/releases**
 
 > If no Windows executable is listed yet, the Windows release is still being prepared.
+
+### About / usage guide
+
+The About window provides direct access to:
+
+- Developer email: `creative2ya@gmail.com`
+- View on GitHub
+- Download Windows version
+- How to use: quick start, major capabilities, and current keyboard shortcuts
+
+PDF passwords are not stored as a global PackDocFit setting. Password protection is chosen in the save workflow for the current document.
 
 ### Privacy
 

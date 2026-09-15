@@ -1,5 +1,15 @@
 # PackDocFit porting notes
 
+## v0.1.4
+
+- Replaced raw DPI-first image export settings with result-first quality presets: Low (120 DPI), Normal (240 DPI), High quality (360 DPI), and Custom (72–600 DPI). The actual DPI is always visible next to the preset.
+- Added explicit annotation value readouts and direct entry: HEX color, opacity percentage, line width in pt, and text size in pt.
+- Moved PDF output password controls out of global Settings and into the PDF save workflow. Passwords are project/session state and are not stored in PackDocFit settings.
+- Added password confirmation before encrypted PDF saving.
+- Expanded About with app version, developer email, GitHub, Windows Releases, and a localized usage guide.
+- Added a localized quick-start / feature / shortcut help view, with Ctrl vs Command shown according to platform.
+- Added How to use to the Settings menu for direct access.
+
 ## v0.1.3
 
 - Reworked Settings into a compact, section-based information architecture.
