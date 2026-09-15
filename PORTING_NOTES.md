@@ -1,3 +1,13 @@
+# PackDocFit porting notes
+
+## v0.1.2
+
+- Added Korean, English, Japanese and Spanish UI languages. Korean is the default for a fresh install and can be changed in Settings.
+- Removed the right inspector panel and bottom status bar to give the document preview more room.
+- Moved annotation defaults into Settings. Selected annotation properties are available from Edit → Annotation properties or by double-clicking an annotation.
+- Added draggable splitters matching the Windows layout concept: sidebar width and Files/Pages vertical split are resizable and remembered in localStorage. Double-click a splitter to reset it.
+- Reused the existing Windows PDF Editor app icon for the web header, favicon and About dialog.
+
 # PackDocFit web-port notes
 
 Source reference: PDF Editor v0.14.4 Build 29 (Windows).

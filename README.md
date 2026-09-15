@@ -31,7 +31,9 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 - 페이지를 PNG/JPG 이미지로 내보내기
 - 선택한 페이지 비교
 - SHA-256을 이용한 중복 파일 확인
+- 한국어 / 영어 / 일본어 / 스페인어 UI
 - 라이트 / 다크 / 시스템 테마
+- 파일 영역 ↔ 페이지 영역, 왼쪽 패널 ↔ 미리보기 영역 크기 드래그 조절
 - 설정 가져오기 / 내보내기
 
 ### 웹 버전 바로 사용하기
@@ -40,7 +42,7 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 
 **https://bak2ya.github.io/PackDocFit/**
 
-PackDocFit은 정적 웹앱이며 PDF 파일 자체를 서버에 업로드하지 않습니다. 앱 실행에 필요한 오픈소스 MuPDF.js 모듈은 고정된 버전으로 로드됩니다.
+PackDocFit은 정적 웹앱이며 PDF 파일 자체를 서버에 업로드하지 않습니다. 앱 실행에 필요한 오픈소스 MuPDF.js 모듈은 고정된 버전으로 로드됩니다. 웹 버전은 기존 Windows PDF Editor의 앱 아이콘을 함께 사용합니다.
 
 ### Windows 버전
 
@@ -112,7 +114,9 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 - Export pages as PNG or JPG
 - Compare selected pages
 - Duplicate-file detection using SHA-256
+- Korean / English / Japanese / Spanish UI
 - Light / dark / system theme
+- Resizable Files / Pages split and resizable sidebar / preview workspace
 - Settings import and export
 
 ### Open the web app
@@ -121,7 +125,7 @@ No installation is required:
 
 **https://bak2ya.github.io/PackDocFit/**
 
-PackDocFit is a static web app. Your documents stay in your browser. A pinned open-source MuPDF.js module is loaded to provide the PDF engine.
+PackDocFit is a static web app. Your documents stay in your browser. A pinned open-source MuPDF.js module is loaded to provide the PDF engine. The web build reuses the app icon from the original Windows PDF Editor.
 
 ### Windows version
 
