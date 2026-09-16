@@ -1,5 +1,8 @@
 # PackDocFit
 
+**현재 웹 버전: v0.2.0 · Build 8**
+
+
 **Pack · Doc · Fit → PDF**  
 **PDF editor on the web.**
 
@@ -17,14 +20,16 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 ### 주요 기능
 
 - 여러 PDF와 이미지 파일을 하나의 작업에 추가
-- 파일 단위 및 페이지 단위 드래그 앤 드롭 순서 변경
+- 파일 단위 및 페이지 단위 드래그 앤 드롭 순서 변경 (페이지 사이 삽입 안내선, 다중 선택 묶음 이동)
 - PDF 병합, 페이지 추출, 삭제, 복사, 잘라내기, 붙여넣기
 - 페이지 회전 및 크기 조절
 - 기준 폭 맞추기 및 표준 용지 크기 맞추기
 - Windows 버전과 같은 작업 흐름의 연속 보기, 축소 시 다열 보기, 한 페이지 보기
 - PDF 텍스트 레이어 선택 및 복사 (OCR 아님)
 - 형광펜, 사각형, 직선, 화살표, 자유형 펜, 텍스트 주석
-- 주석 이동, 크기 변경, 속성 변경 및 삭제
+- 주석 도구 1회 사용 후 선택/이동으로 자동 복귀
+- 직선/화살표 끝점 편집, 자유형 펜 이동, 주석 이동·크기·속성 변경 및 삭제
+- 실선/파선/점선, 사각형 각진/둥근 모서리, 열린/채운 화살촉 스타일
 - Undo / Redo
 - 암호가 설정된 PDF 열기
 - PDF 저장 시 필요할 때 AES-256 암호 설정
@@ -32,7 +37,7 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 - 선택한 페이지 비교
 - SHA-256을 이용한 중복 파일 확인
 - 한국어 / 영어 / 일본어 / 스페인어 UI
-- 라이트 / 다크 / 시스템 테마
+- 시스템 / 라이트 / 다크 / 블랙(OLED) 테마
 - 파일 영역 ↔ 페이지 영역, 왼쪽 패널 ↔ 미리보기 영역 크기 드래그 조절
 - 실제 페이지 썸네일 중심의 왼쪽 페이지 목록과 중앙 PDF 미리보기
 - 설정 가져오기 / 내보내기
@@ -113,14 +118,16 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 ### Features
 
 - Open multiple PDF and image files in one project
-- File-level and page-level drag-and-drop reordering
+- File-level and page-level drag-and-drop reordering with insertion guides and grouped multi-page moves
 - Merge, extract, delete, copy, cut and paste pages
 - Rotate and resize pages
 - Fit pages to a reference width or standard paper sizes
 - Continuous viewing matching the Windows workflow, adaptive multi-column viewing when zoomed out, and single-page viewing
 - PDF text-layer selection and copy (no OCR)
 - Highlight, rectangle, line, arrow, freehand ink and text annotations
-- Move, resize, restyle and delete annotations
+- One-shot annotation tools that automatically return to Select/Move
+- Endpoint editing for lines/arrows, stroke-based ink movement, and annotation move/resize/restyle/delete
+- Solid/dashed/dotted strokes, square/rounded rectangle corners, and open/closed arrowheads
 - Undo / redo
 - Open password-protected PDFs
 - Optionally apply AES-256 password encryption when saving a PDF
@@ -128,7 +135,7 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 - Compare selected pages
 - Duplicate-file detection using SHA-256
 - Korean / English / Japanese / Spanish UI
-- Light / dark / system theme
+- System / light / dark / Black (OLED) theme
 - Resizable Files / Pages split and resizable sidebar / preview workspace
 - Page-thumbnail-focused sidebar and central PDF preview modeled after the Windows build
 - Settings import and export
@@ -213,3 +220,14 @@ npm run preview
 PackDocFit is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
 MuPDF.js is also available under AGPL and commercial licensing terms. PackDocFit uses the AGPL-compatible open-source distribution.
+
+## v0.2.0 · Build 8 주요 변경
+
+- House Light / Dark / Black(OLED) 테마와 시스템 테마 실시간 추적
+- 플랫폼 시스템 폰트 우선 적용
+- 아이콘 전용 버튼의 접근성 이름, 모달 포커스 트랩, 키보드 메뉴 탐색
+- 파일/페이지 및 사이드바 분할선 키보드 조절
+- 좁은 화면에서도 기능 진입점이 사라지지 않는 더보기 메뉴
+- 형광펜 동작 설정을 Toggle 의미로 정리하고 고급 주석 스타일을 접기 영역으로 분리
+- 수정된 페이지 상태를 색상 점만이 아닌 편집 아이콘 + 접근성 레이블로 표시
+

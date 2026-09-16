@@ -5,6 +5,8 @@ import { tr } from './i18n.js'
 const MM_TO_PT = 72 / 25.4
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/bmp', 'image/gif', 'image/tiff'])
 const IMAGE_EXT = /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i
+const APP_VERSION = '0.2.0'
+const APP_BUILD = 8
 
 const $ = (sel, root = document) => root.querySelector(sel)
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)]
@@ -42,6 +44,8 @@ function icon(name) {
     windows: '<path d="M3 5.5 10.5 4v7H3zM12 3.7 21 2v9h-9zM3 12.5h7.5v7L3 18zM12 12.5h9V22l-9-1.7z"/>',
     help: '<circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 0 1 4.6 1c0 2-2.4 2.1-2.4 4M12 17h.01"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    edit: '<path d="M4 20h4l11-11-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   }[name] || '<circle cx="12" cy="12" r="8"/>'
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`
 }
@@ -77,6 +81,45 @@ function pagePointFromEvent(ev, el, pageBounds) {
   return [x,y]
 }
 function filenameStem(name='document.pdf') { return name.replace(/\.[^.]+$/, '') || 'document' }
+
+const ANNOT_META_PREFIX = 'PackDocFitMeta:'
+function parseAnnotMeta(a) {
+  try {
+    const subject = String(a?.getSubject?.() || '')
+    if (!subject.startsWith(ANNOT_META_PREFIX)) return {}
+    const data = JSON.parse(subject.slice(ANNOT_META_PREFIX.length))
+    return data && typeof data === 'object' ? data : {}
+  } catch { return {} }
+}
+function setAnnotMeta(a, meta={}) {
+  try { a?.setSubject?.(`${ANNOT_META_PREFIX}${JSON.stringify(meta)}`) } catch {}
+}
+function dashPattern(style) {
+  if (style === 'dashed') return [7,4]
+  if (style === 'dotted') return [2,3]
+  return []
+}
+function applyAnnotDash(a, style='solid') {
+  try {
+    const pattern=dashPattern(style)
+    if(pattern.length){ a.setBorderStyle?.('Dashed'); a.setBorderDashPattern?.(pattern) }
+    else { a.clearBorderDash?.(); a.setBorderStyle?.('Solid') }
+  } catch {}
+}
+function roundedRectPoints(r) {
+  const w=Math.max(0,r[2]-r[0]), h=Math.max(0,r[3]-r[1])
+  let radius=Math.min(14,Math.max(3,Math.min(w,h)*.13))
+  if(w<radius*2.2||h<radius*2.2)radius=Math.max(1,Math.min(w,h)*.18)
+  const pts=[]
+  const arc=(cx,cy,a0,a1,steps=5)=>{for(let i=0;i<=steps;i++){const a=(a0+(a1-a0)*(i/steps))*Math.PI/180;pts.push([cx+radius*Math.cos(a),cy+radius*Math.sin(a)])}}
+  pts.push([r[0]+radius,r[1]],[r[2]-radius,r[1]])
+  arc(r[2]-radius,r[1]+radius,-90,0)
+  pts.push([r[2],r[3]-radius]);arc(r[2]-radius,r[3]-radius,0,90)
+  pts.push([r[0]+radius,r[3]]);arc(r[0]+radius,r[3]-radius,90,180)
+  pts.push([r[0],r[1]+radius]);arc(r[0]+radius,r[1]+radius,180,270)
+  if(pts.length){const a=pts[0],b=pts[pts.length-1];if(a[0]!==b[0]||a[1]!==b[1])pts.push([...a])}
+  return pts
+}
 
 function asBytes(value) {
   if (!value) return new Uint8Array()
@@ -114,6 +157,10 @@ export class PackDocFitApp {
     this.selectedAnnot = null
     this.dragDrawing = null
     this.dragAnnot = null
+    this.pageDrag = null
+    this.suppressPageClickUntil = 0
+    this.singleDisplayWidthOverride = null
+    this.annotationDisplayDirty = false
     this.renderToken = 0
     this.thumbToken = 0
     this.settings = this.loadSettings()
@@ -126,6 +173,8 @@ export class PackDocFitApp {
     this.displayRenderer = new PdfDisplayRenderer(() => this.makePdfBytes({ decrypt: true }))
     this.continuousObserver = null
     this.thumbnailObserver = null
+    this.systemThemeMedia = null
+    this.systemThemeListener = null
   }
 
   t(key, vars={}) { return tr(this.language, key, vars) }
@@ -135,11 +184,13 @@ export class PackDocFitApp {
     this.newProject(false)
     this.bindGlobalEvents()
     this.applyTheme()
+    this.bindSystemThemeListener()
     this.updateAll()
   }
 
   buildShell() {
     document.documentElement.lang = this.language
+    const mod=this.modKey()
     this.root.innerHTML = `
       <div class="app-shell">
         <header class="topbar">
@@ -149,25 +200,26 @@ export class PackDocFitApp {
             <span class="brand-subtitle">${this.t('appSubtitle')}</span>
           </div>
           <nav class="menu-strip">
-            <button class="menu-button" data-menu="file">${this.t('file')}</button>
-            <button class="menu-button" data-menu="edit">${this.t('edit')}</button>
-            <button class="menu-button" data-menu="page">${this.t('page')}</button>
-            <button class="menu-button" data-menu="view">${this.t('view')}</button>
-            <button class="menu-button" data-menu="compare">${this.t('compare')}</button>
-            <button class="menu-button" data-menu="settings">${this.t('settings')}</button>
+            <button class="menu-button" type="button" data-menu="file" aria-haspopup="menu" aria-expanded="false">${this.t('file')}</button>
+            <button class="menu-button" type="button" data-menu="edit" aria-haspopup="menu" aria-expanded="false">${this.t('edit')}</button>
+            <button class="menu-button" type="button" data-menu="page" aria-haspopup="menu" aria-expanded="false">${this.t('page')}</button>
+            <button class="menu-button" type="button" data-menu="view" aria-haspopup="menu" aria-expanded="false">${this.t('view')}</button>
+            <button class="menu-button" type="button" data-menu="compare" aria-haspopup="menu" aria-expanded="false">${this.t('compare')}</button>
+            <button class="menu-button" type="button" data-menu="settings" aria-haspopup="menu" aria-expanded="false">${this.t('settings')}</button>
           </nav>
           <div class="top-actions">
             <div class="privacy-pill"><span class="privacy-dot"></span><span>${this.t('localOnly')}</span></div>
-            <button class="tool-button" data-action="settings" title="${this.t('settings')}">${icon('settings')}</button>
-            <button class="tool-button" data-action="about" title="${this.t('about')}">${icon('info')}</button>
+            <button class="tool-button compact-menu-button" type="button" data-menu="overflow" aria-haspopup="menu" aria-expanded="false" title="${this.t('moreMenu')}" aria-label="${this.t('moreMenu')}">${icon('menu')}</button>
+            <button class="tool-button" type="button" data-action="settings" title="${this.t('settings')}" aria-label="${this.t('settings')}">${icon('settings')}</button>
+            <button class="tool-button" type="button" data-action="about" title="${this.t('about')}" aria-label="${this.t('about')}">${icon('info')}</button>
           </div>
         </header>
 
         <div class="toolbar">
           <div class="tool-group">
-            ${this.tb('new','new',`${this.t('newProject')} (Ctrl+N)`)}
-            ${this.tb('open','open',`${this.t('addFiles')} (Ctrl+O)`)}
-            ${this.tb('save','save',`${this.t('save')} (Ctrl+S)`, true)}
+            ${this.tb('new','new',`${this.t('newProject')} (${mod}+N)`)}
+            ${this.tb('open','open',`${this.t('addFiles')} (${mod}+O)`)}
+            ${this.tb('save','save',`${this.t('save')} (${mod}+S)`, true)}
             ${this.tb('extract','extract',this.t('extract'), true)}
           </div>
           <div class="tool-sep"></div>
@@ -178,13 +230,13 @@ export class PackDocFitApp {
           </div>
           <div class="tool-sep"></div>
           <div class="tool-group">
-            ${this.tb('undo','undo',`${this.t('undo')} (Ctrl+Z)`, true)}
-            ${this.tb('redo','redo',`${this.t('redo')} (Ctrl+Y)`, true)}
+            ${this.tb('undo','undo',`${this.t('undo')} (${mod}+Z)`, true)}
+            ${this.tb('redo','redo',`${this.t('redo')} (${mod}+Y)`, true)}
           </div>
           <div class="tool-sep"></div>
           <div class="tool-group">
             ${this.tb('continuous','continuous',this.t('continuous'))}
-            ${this.tb('single','single',`${this.t('single')} (Ctrl+0)`)}
+            ${this.tb('single','single',`${this.t('single')} (${mod}+0)`)}
           </div>
           <div class="tool-sep"></div>
           <div class="tool-group annotation-tools">
@@ -202,22 +254,22 @@ export class PackDocFitApp {
           <aside class="sidebar" id="sidebar">
             <section class="source-pane">
               <span id="fileCount" hidden>0</span>
-              <div class="source-scroll"><div class="source-list" id="sourceList"></div></div>
+              <div class="source-scroll"><div class="source-list" id="sourceList" role="list" aria-label="${this.t('files')}"></div></div>
             </section>
-            <div class="splitter splitter-horizontal" id="sourcePageSplitter" role="separator" aria-orientation="horizontal" title="${this.t('splitterReset')}"></div>
+            <div class="splitter splitter-horizontal" id="sourcePageSplitter" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="${this.t('sourcePageSplitterLabel')}" aria-valuemin="14" aria-valuemax="78" aria-valuenow="${Math.round(Number(this.settings.filesSplitPct)||24)}" title="${this.t('splitterReset')}"></div>
             <section class="page-pane">
               <span id="pageCount" hidden>0</span>
-              <div class="sidebar-scroll"><div class="page-list" id="pageList"></div></div>
+              <div class="sidebar-scroll"><div class="page-list" id="pageList" role="listbox" aria-multiselectable="true" aria-label="${this.t('pages')}"></div></div>
             </section>
           </aside>
-          <div class="splitter splitter-vertical" id="sidebarSplitter" role="separator" aria-orientation="vertical" title="${this.t('splitterReset')}"></div>
+          <div class="splitter splitter-vertical" id="sidebarSplitter" role="separator" tabindex="0" aria-orientation="vertical" aria-label="${this.t('sidebarSplitterLabel')}" aria-valuemin="180" aria-valuemax="520" aria-valuenow="${Math.round(Number(this.settings.sidebarWidth)||245)}" title="${this.t('splitterReset')}"></div>
           <section class="stage" id="stage">
             <div class="stage-scroll" id="stageScroll"></div>
           </section>
         </main>
       </div>
       <input id="fileInput" type="file" hidden multiple accept="application/pdf,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff" />
-      <div class="toast-host" id="toastHost"></div>
+      <div class="toast-host" id="toastHost" role="status" aria-live="polite" aria-atomic="true"></div>
     `
 
     this.els = {
@@ -249,6 +301,8 @@ export class PackDocFitApp {
   applyLayoutSettings() {
     this.root.style.setProperty('--sidebar-w', `${clamp(Number(this.settings.sidebarWidth)||245, 180, 520)}px`)
     this.root.style.setProperty('--files-split', `${clamp(Number(this.settings.filesSplitPct)||24, 14, 78)}%`)
+    if(this.els?.sidebarSplitter)this.els.sidebarSplitter.setAttribute('aria-valuenow',String(Math.round(Number(this.settings.sidebarWidth)||245)))
+    if(this.els?.sourcePageSplitter)this.els.sourcePageSplitter.setAttribute('aria-valuenow',String(Math.round(Number(this.settings.filesSplitPct)||24)))
   }
 
   bindWorkspaceChrome() {
@@ -293,13 +347,25 @@ export class PackDocFitApp {
       const up = () => { this.els.sourcePageSplitter.removeEventListener('pointermove',move); this.els.sourcePageSplitter.removeEventListener('pointerup',up); finish() }
       this.els.sourcePageSplitter.addEventListener('pointermove',move); this.els.sourcePageSplitter.addEventListener('pointerup',up)
     })
+    const splitterKeyStep=(e,kind)=>{
+      const big=e.shiftKey
+      if(kind==='sidebar'&&['ArrowLeft','ArrowRight','Home'].includes(e.key)){
+        e.preventDefault(); this.settings.sidebarWidth=e.key==='Home'?245:clamp((Number(this.settings.sidebarWidth)||245)+(e.key==='ArrowRight'?(big?32:12):-(big?32:12)),180,520); this.applyLayoutSettings(); this.saveSettings(); this.renderSidebar(); this.renderStage()
+      } else if(kind==='source'&&['ArrowUp','ArrowDown','Home'].includes(e.key)){
+        e.preventDefault(); this.settings.filesSplitPct=e.key==='Home'?24:clamp((Number(this.settings.filesSplitPct)||24)+(e.key==='ArrowDown'?(big?8:2):-(big?8:2)),14,78); this.applyLayoutSettings(); this.saveSettings()
+      }
+    }
+    this.els.sidebarSplitter.addEventListener('keydown',e=>splitterKeyStep(e,'sidebar'))
+    this.els.sourcePageSplitter.addEventListener('keydown',e=>splitterKeyStep(e,'source'))
     this.els.sidebarSplitter.addEventListener('dblclick',()=>{this.settings.sidebarWidth=245;this.applyLayoutSettings();this.saveSettings();this.renderSidebar();this.renderStage()})
     this.els.sourcePageSplitter.addEventListener('dblclick',()=>{this.settings.filesSplitPct=24;this.applyLayoutSettings();this.saveSettings()})
   }
 
   tb(action, iconName, title, disabled=false, cls='') {
-    return `<button class="tool-button ${cls}" data-action="${action}" title="${title}" ${disabled?'disabled':''}>${icon(iconName)}</button>`
+    return `<button class="tool-button ${cls}" type="button" data-action="${action}" title="${esc(title)}" aria-label="${esc(title)}" ${disabled?'disabled':''}>${icon(iconName)}</button>`
   }
+
+  modKey(){return /Mac|iPhone|iPad|iPod/i.test(navigator.platform||navigator.userAgent)?'⌘':'Ctrl'}
 
   bindGlobalEvents() {
     window.addEventListener('keydown', e => this.onKeyDown(e))
@@ -459,8 +525,29 @@ export class PackDocFitApp {
 
   withOperation(label, fn) {
     this.project.beginOperation(label)
-    try { const out=fn(); this.project.endOperation(); this.dirty=true; this.displayRenderer?.invalidate(); return out }
-    catch (e) { try { this.project.abandonOperation() } catch {}; throw e }
+    try {
+      const out=fn(); this.project.endOperation(); this.dirty=true
+      this.annotationDisplayDirty=false
+      this.displayRenderer?.invalidate()
+      return out
+    } catch (e) { try { this.project.abandonOperation() } catch {}; throw e }
+  }
+
+  withAnnotationOperation(label, fn) {
+    this.project.beginOperation(label)
+    try {
+      const out=fn(); this.project.endOperation(); this.dirty=true
+      // Keep PDF.js' full-project snapshot deferred while the one-page annotation
+      // surface is active. The current page is repainted directly from MuPDF.
+      this.annotationDisplayDirty=true
+      return out
+    } catch (e) { try { this.project.abandonOperation() } catch {}; throw e }
+  }
+
+  flushAnnotationDisplaySnapshot() {
+    if(!this.annotationDisplayDirty)return
+    this.annotationDisplayDirty=false
+    this.displayRenderer?.invalidate()
   }
 
   async save(forceAs=false) {
@@ -579,14 +666,58 @@ export class PackDocFitApp {
     this.updateAll(true)
   }
 
-  reorderPage(from,to) {
-    if (from===to || from<0 || to<0 || from>=this.pageCount() || to>=this.pageCount()) return
-    const order=Array.from({length:this.pageCount()},(_,i)=>i)
-    const [moved]=order.splice(from,1); order.splice(to,0,moved)
-    this.withOperation('Reorder pages',()=>this.project.rearrangePages(order))
-    const [meta]=this.pageMeta.splice(from,1); this.pageMeta.splice(to,0,meta)
-    this.pageMeta.forEach((m,i)=>{ if(i===to) m.modified=true })
-    this.currentPage=to; this.selected=new Set([to]); this.anchorPage=to
+  beginPageDrag(e,index,origin){
+    const indices=this.selected.has(index)&&this.selected.size?this.targets():[index]
+    if(!this.selected.has(index)){
+      this.selected=new Set([index]);this.currentPage=index;this.anchorPage=index;this.syncSidebarSelection();this.syncStageSelection();this.renderSourceList();this.updateButtons()
+    }
+    this.pageDrag={indices:[...indices].sort((a,b)=>a-b),origin,index,insertion:null}
+    e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('application/x-packdocfit-pages',JSON.stringify(this.pageDrag.indices));e.dataTransfer.setData('text/page-index',String(index))
+    // Native browser drag images can look like a second selected page and hide
+    // the insertion cue. Keep the selection in place and show only our guide bar.
+    const dragImage=document.createElement('canvas');dragImage.width=1;dragImage.height=1;Object.assign(dragImage.style,{position:'fixed',left:'-20px',top:'-20px',opacity:'0',pointerEvents:'none'});document.body.append(dragImage)
+    try{e.dataTransfer.setDragImage(dragImage,0,0)}catch{};setTimeout(()=>dragImage.remove(),0)
+    document.body.classList.add('page-reordering')
+  }
+
+  updatePageDropIndicator(e,el,index,origin){
+    if(!this.pageDrag)return
+    e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect='move'
+    const r=el.getBoundingClientRect(), after=e.clientY>=r.top+r.height/2, insertion=index+(after?1:0)
+    this.pageDrag.insertion=insertion;this.clearPageDropIndicators();el.classList.add(after?'page-drop-after':'page-drop-before')
+  }
+
+  maybeClearPageDropIndicator(e,el){
+    const next=e.relatedTarget;if(next&&el.contains(next))return
+    el.classList.remove('page-drop-before','page-drop-after')
+  }
+
+  finishPageDrop(e,index,el){
+    if(!this.pageDrag)return
+    e.preventDefault();e.stopPropagation();const insertion=Number.isInteger(this.pageDrag.insertion)?this.pageDrag.insertion:index
+    const indices=[...this.pageDrag.indices];this.suppressPageClickUntil=Date.now()+350;this.endPageDrag(false);this.reorderPagesAtInsertion(indices,insertion)
+  }
+
+  endPageDrag(clearSuppress=true){
+    this.clearPageDropIndicators();document.body.classList.remove('page-reordering');this.pageDrag=null
+    if(clearSuppress)this.suppressPageClickUntil=Date.now()+180
+  }
+
+  clearPageDropIndicators(){
+    $$('.page-drop-before,.page-drop-after',this.root).forEach(el=>el.classList.remove('page-drop-before','page-drop-after'))
+  }
+
+  reorderPagesAtInsertion(indices,insertion){
+    const n=this.pageCount(),moving=[...new Set(indices)].filter(i=>i>=0&&i<n).sort((a,b)=>a-b);if(!moving.length)return
+    insertion=clamp(Number(insertion)||0,0,n)
+    const moveSet=new Set(moving),order=Array.from({length:n},(_,i)=>i),remaining=order.filter(i=>!moveSet.has(i))
+    const adjusted=clamp(insertion-moving.filter(i=>i<insertion).length,0,remaining.length)
+    const next=[...remaining.slice(0,adjusted),...moving,...remaining.slice(adjusted)]
+    if(next.every((v,i)=>v===i))return
+    const oldMeta=[...this.pageMeta],oldCurrent=this.currentPage
+    this.withOperation('Reorder pages',()=>this.project.rearrangePages(next))
+    this.pageMeta=next.map(i=>oldMeta[i]);const newSel=Array.from({length:moving.length},(_,i)=>adjusted+i);newSel.forEach(i=>{if(this.pageMeta[i])this.pageMeta[i].modified=true})
+    const currentRank=moving.indexOf(oldCurrent);this.currentPage=currentRank>=0?adjusted+currentRank:Math.max(0,next.indexOf(oldCurrent));this.selected=new Set(newSel);this.anchorPage=this.currentPage
     this.updateAll(true)
   }
 
@@ -687,11 +818,17 @@ export class PackDocFitApp {
 
   setViewMode(mode) {
     if(mode==='single' && this.selected.size>1) return this.openCompare(this.settings.compareMode||'horizontal')
+    if(mode==='continuous') this.flushAnnotationDisplaySnapshot()
     this.viewMode=mode; this.settings.viewMode=mode; this.saveSettings(); this.selectedAnnot=null; this.renderStage(); this.updateButtons(); this.renderInspector()
   }
   setTool(tool) {
+    if(tool!=='select' && this.viewMode!=='single') {
+      const card=$(`.page-card[data-page="${this.currentPage}"] .page-paper`,this.els.stageScroll)
+      const visibleWidth=card?.getBoundingClientRect?.().width
+      if(visibleWidth>40) this.singleDisplayWidthOverride=visibleWidth
+      this.viewMode='single'
+    }
     this.tool=tool
-    if(tool!=='select') this.viewMode='single'
     this.selectedAnnot=null
     this.renderStage(); this.updateButtons(); this.renderInspector()
   }
@@ -711,12 +848,12 @@ export class PackDocFitApp {
   }
 
   syncSidebarSelection(){
-    $$('.page-item',this.els.pageList).forEach(item=>{const i=Number(item.dataset.page);item.classList.toggle('selected',this.selected.has(i));item.classList.toggle('current',i===this.currentPage)})
+    $$('.page-item',this.els.pageList).forEach(item=>{const i=Number(item.dataset.page),selected=this.selected.has(i),current=i===this.currentPage;item.classList.toggle('selected',selected);item.classList.toggle('current',current);item.setAttribute('aria-selected',selected?'true':'false');if(current)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')})
   }
 
   syncStageSelection(){
     $$('.page-card',this.els.stageScroll).forEach(card=>{
-      const i=Number(card.dataset.page);card.classList.toggle('selected',this.selected.has(i));card.classList.toggle('current',i===this.currentPage)
+      const i=Number(card.dataset.page),selected=this.selected.has(i),current=i===this.currentPage;card.classList.toggle('selected',selected);card.classList.toggle('current',current);card.setAttribute('aria-selected',selected?'true':'false');if(current)card.setAttribute('aria-current','page');else card.removeAttribute('aria-current')
     })
   }
 
@@ -761,13 +898,15 @@ export class PackDocFitApp {
     const groups=this.sourceGroups(); if(this.els.fileCount)this.els.fileCount.textContent=groups.length
     if(!this.els.sourceList)return
     if(!groups.length){this.els.sourceList.innerHTML=`<div class="source-empty">${this.t('addFilesStart')}</div>`;return}
-    this.els.sourceList.innerHTML=groups.map(g=>`<div class="source-item ${g.pages.includes(this.currentPage)?'selected':''}" data-source-id="${esc(g.id)}" draggable="true" title="${esc(g.name)}">
+    this.els.sourceList.innerHTML=groups.map(g=>`<div class="source-item ${g.pages.includes(this.currentPage)?'selected':''}" data-source-id="${esc(g.id)}" draggable="true" tabindex="0" role="listitem" ${g.pages.includes(this.currentPage)?'aria-current="true"':''} title="${esc(g.name)}">
       <div class="source-info"><strong>${esc(g.name)}</strong><span> · ${g.pages.length}p</span></div>
       <button class="source-remove" title="${esc(this.t('removeFile'))}" aria-label="${esc(this.t('removeFile'))}">×</button>
     </div>`).join('')
     $$('.source-item',this.els.sourceList).forEach(el=>{
       const id=el.dataset.sourceId
-      el.addEventListener('click',e=>{if(e.target.closest('.source-remove'))return;const g=this.sourceGroups().find(x=>x.id===id);if(g?.pages.length){this.currentPage=g.pages[0];this.selected=new Set(g.pages);this.anchorPage=g.pages[0];this.updateAll()}})
+      const chooseSource=()=>{const g=this.sourceGroups().find(x=>x.id===id);if(g?.pages.length){this.currentPage=g.pages[0];this.selected=new Set(g.pages);this.anchorPage=g.pages[0];this.updateAll()}}
+      el.addEventListener('click',e=>{if(e.target.closest('.source-remove'))return;chooseSource()})
+      el.addEventListener('keydown',e=>{if(e.target.closest('.source-remove'))return;if(e.key==='Enter'||e.key===' '){e.preventDefault();chooseSource()}else if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const els=$$('.source-item',this.els.sourceList),idx=els.indexOf(el),next=clamp(idx+(e.key==='ArrowDown'?1:-1),0,els.length-1);els[next]?.focus()}})
       el.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/source-id',id);e.dataTransfer.effectAllowed='move'})
       el.addEventListener('dragover',e=>{e.preventDefault();el.classList.add('drag-over')})
       el.addEventListener('dragleave',()=>el.classList.remove('drag-over'))
@@ -807,20 +946,22 @@ export class PackDocFitApp {
     this.els.pageList.innerHTML=Array.from({length:n},(_,i)=>{
       const m=this.pageMeta[i]||{source:'Document',sourcePage:i+1,modified:false}
       const stem=filenameStem(m.source||'Document')
-      return `<div class="page-item ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}" data-page="${i}" draggable="true" title="${esc(m.source||'')}">
+      return `<div class="page-item ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}" data-page="${i}" draggable="true" tabindex="0" role="option" aria-selected="${this.selected.has(i)?'true':'false'}" ${i===this.currentPage?'aria-current="page"':''} title="${esc(m.source||'')}">
         <div class="thumb-wrap"><canvas aria-label="${esc(this.t('pageLabel'))} ${i+1}"></canvas><span class="thumb-loading">${i+1}</span></div>
-        <div class="page-caption">${esc(stem)} · p${m.sourcePage||i+1}${m.modified?`<span class="modified-dot" title="${esc(this.t('modified'))}"></span>`:''}</div>
+        <div class="page-caption">${esc(stem)} · p${m.sourcePage||i+1}${m.modified?`<span class="modified-marker" role="img" aria-label="${esc(this.t('modified'))}" title="${esc(this.t('modified'))}">${icon('edit')}</span>`:''}</div>
       </div>`
     }).join('')
 
     $$('.page-item',this.els.pageList).forEach(el=>{
       const i=+el.dataset.page
-      el.addEventListener('click',e=>this.selectPage(i,e))
+      el.addEventListener('click',e=>{if(Date.now()<this.suppressPageClickUntil)return;this.selectPage(i,e)})
+      el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();this.selectPage(i,e)}else if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const next=clamp(i+(e.key==='ArrowDown'?1:-1),0,this.pageCount()-1);$(`.page-item[data-page="${next}"]`,this.els.pageList)?.focus()}})
       el.addEventListener('dblclick',e=>{e.preventDefault();this.currentPage=i;this.selected=new Set([i]);this.anchorPage=i;this.setViewMode('single')})
-      el.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/page-index',String(i)); e.dataTransfer.effectAllowed='move' })
-      el.addEventListener('dragover',e=>{e.preventDefault();el.classList.add('drag-over')})
-      el.addEventListener('dragleave',()=>el.classList.remove('drag-over'))
-      el.addEventListener('drop',e=>{e.preventDefault();el.classList.remove('drag-over');const from=Number(e.dataTransfer.getData('text/page-index')); if(Number.isInteger(from))this.reorderPage(from,i)})
+      el.addEventListener('dragstart',e=>this.beginPageDrag(e,i,'sidebar'))
+      el.addEventListener('dragover',e=>this.updatePageDropIndicator(e,el,i,'sidebar'))
+      el.addEventListener('dragleave',e=>this.maybeClearPageDropIndicator(e,el))
+      el.addEventListener('drop',e=>this.finishPageDrop(e,i,el))
+      el.addEventListener('dragend',()=>this.endPageDrag())
     })
     this.renderThumbnails(token)
   }
@@ -913,8 +1054,9 @@ export class PackDocFitApp {
   }
 
   async renderContinuous(token) {
+    this.flushAnnotationDisplaySnapshot()
     const {cols,width}=this.continuousLayoutMetrics()
-    this.els.stageScroll.innerHTML=`<div class="continuous-view" style="--cols:${cols}" id="continuous"></div>`
+    this.els.stageScroll.innerHTML=`<div class="continuous-view" style="--cols:${cols}" id="continuous" role="listbox" aria-multiselectable="true" aria-label="${this.t('pages')}"></div>`
     const wrap=$('#continuous',this.els.stageScroll)
     try { await this.displayRenderer.getDocument() } catch(e) { console.warn('display snapshot',e) }
     for(let i=0;i<this.pageCount();i++){
@@ -923,14 +1065,16 @@ export class PackDocFitApp {
       try{const info=await this.displayRenderer.pageInfo(i);ratio=info.height/Math.max(info.width,1)}catch{try{const p=this.project.loadPage(i);const b=p.getBounds();ratio=(b[3]-b[1])/Math.max(1,b[2]-b[0]);p.destroy?.()}catch{}}
       const h=Math.max(80,Math.round(width*ratio))
       const m=this.pageMeta[i]||{}
-      const card=document.createElement('div');card.className=`page-card ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}`;card.dataset.page=i;card.draggable=true
-      card.innerHTML=`<div class="page-paper" style="width:${width}px;height:${h}px"><canvas data-render-state="idle"></canvas><div class="page-skeleton">${esc(this.t('previewLoading'))}</div></div><div class="page-card-caption">${i+1} · ${esc(filenameStem(m.source||'Document'))}-${m.sourcePage||i+1}</div>`
-      card.addEventListener('click',e=>this.selectPage(i,e))
+      const card=document.createElement('div');card.className=`page-card ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}`;card.dataset.page=i;card.draggable=true;card.tabIndex=0;card.setAttribute('role','option');card.setAttribute('aria-selected',this.selected.has(i)?'true':'false');if(i===this.currentPage)card.setAttribute('aria-current','page')
+      card.innerHTML=`<div class="page-paper" style="width:${width}px;height:${h}px"><canvas data-render-state="idle"></canvas><div class="page-skeleton">${esc(this.t('previewLoading'))}</div></div><div class="page-card-caption">${i+1} · ${esc(filenameStem(m.source||'Document'))}-${m.sourcePage||i+1}${m.modified?`<span class="modified-marker" role="img" aria-label="${esc(this.t('modified'))}" title="${esc(this.t('modified'))}">${icon('edit')}</span>`:''}</div>`
+      card.addEventListener('click',e=>{if(Date.now()<this.suppressPageClickUntil)return;this.selectPage(i,e)})
+      card.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();this.selectPage(i,e)}else if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const next=clamp(i+(e.key==='ArrowDown'?1:-1),0,this.pageCount()-1);$(`.page-card[data-page="${next}"]`,this.els.stageScroll)?.focus()}})
       card.addEventListener('dblclick',e=>{e.preventDefault();this.currentPage=i;this.selected=new Set([i]);this.anchorPage=i;this.setViewMode('single')})
-      card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/page-index',String(i));e.dataTransfer.effectAllowed='move'})
-      card.addEventListener('dragover',e=>{e.preventDefault();card.classList.add('drag-over')})
-      card.addEventListener('dragleave',()=>card.classList.remove('drag-over'))
-      card.addEventListener('drop',e=>{e.preventDefault();card.classList.remove('drag-over');const from=Number(e.dataTransfer.getData('text/page-index'));if(Number.isInteger(from))this.reorderPage(from,i)})
+      card.addEventListener('dragstart',e=>this.beginPageDrag(e,i,'stage'))
+      card.addEventListener('dragover',e=>this.updatePageDropIndicator(e,card,i,'stage'))
+      card.addEventListener('dragleave',e=>this.maybeClearPageDropIndicator(e,card))
+      card.addEventListener('drop',e=>this.finishPageDrop(e,i,card))
+      card.addEventListener('dragend',()=>this.endPageDrag())
       wrap.append(card)
     }
 
@@ -963,7 +1107,10 @@ export class PackDocFitApp {
       let bounds,pw,ph
       try{const info=await this.displayRenderer.pageInfo(this.currentPage);pw=info.width;ph=info.height}catch{page=this.project.loadPage(this.currentPage);bounds=page.getBounds();pw=bounds[2]-bounds[0];ph=bounds[3]-bounds[1]}
       const availW=Math.max(220,this.els.stage.clientWidth-84),availH=Math.max(220,this.els.stage.clientHeight-100)
-      const fit=Math.min(availW/pw,availH/ph),scale=clamp(fit*this.zoom,.2,4),width=Math.round(pw*scale),height=Math.round(ph*scale)
+      const fit=Math.min(availW/pw,availH/ph)
+      let scale=clamp(fit*this.zoom,.2,4)
+      if(this.singleDisplayWidthOverride>40){scale=clamp(this.singleDisplayWidthOverride/Math.max(pw,1),.2,4);this.singleDisplayWidthOverride=null}
+      const width=Math.round(pw*scale),height=Math.round(ph*scale)
       const m=this.pageMeta[this.currentPage]||{}
       this.els.stageScroll.innerHTML=`<div class="single-wrap"><div class="single-page-shell"><div class="single-page" id="singlePage" style="width:${width}px;height:${height}px">
         <canvas id="singleCanvas" style="width:${width}px;height:${height}px"></canvas>
@@ -973,7 +1120,8 @@ export class PackDocFitApp {
         <div class="interaction-layer" id="interactionLayer"></div>
       </div><div class="single-caption">${this.currentPage+1} · ${esc(filenameStem(m.source||'Document'))}-${m.sourcePage||this.currentPage+1}</div></div></div>`
       const canvas=$('#singleCanvas',this.els.stageScroll)
-      await this.renderDisplayCanvas(this.currentPage,canvas,{cssScale:scale,maxDpr:2})
+      if(this.annotationDisplayDirty) await this.renderMupdfFallbackToCanvas(this.currentPage,canvas,{cssScale:scale,maxDpr:2})
+      else await this.renderDisplayCanvas(this.currentPage,canvas,{cssScale:scale,maxDpr:2})
       if(token!==this.renderToken)return
       $('#singleLoading',this.els.stageScroll)?.remove()
       if(!page){page=this.project.loadPage(this.currentPage);bounds=page.getBounds()}
@@ -999,20 +1147,80 @@ export class PackDocFitApp {
     } catch(e){ console.warn('text layer',e) } finally { try{st?.destroy?.()}catch{} }
   }
 
+  annotationKind(a) {
+    const meta=parseAnnotMeta(a), type=String(a?.getType?.()||'')
+    if(meta.tool)return meta.tool
+    if(type==='Highlight')return 'highlight'
+    if(type==='Square')return 'rectangle'
+    if(type==='Line'){
+      try{const endings=a.getLineEndingStyles?.();if(endings?.end&&endings.end!=='None')return 'arrow'}catch{}
+      return 'line'
+    }
+    if(type==='Ink')return 'ink'
+    if(type==='FreeText')return 'text'
+    return type.toLowerCase()
+  }
+
   renderAnnotationLayer(page,bounds,scale) {
-    const layer=$('#annotationLayer',this.els.stageScroll), interaction=$('#interactionLayer',this.els.stageScroll); if(!layer||!interaction)return
+    const interaction=$('#interactionLayer',this.els.stageScroll); if(!interaction)return
     let annots=[]; try{annots=page.getAnnotations()}catch{}
     annots.forEach((a,idx)=>{
       let r; try{r=a.getBounds()}catch{return}
+      const kind=this.annotationKind(a), selected=this.selectedAnnot?.pageIndex===this.currentPage&&this.selectedAnnot?.annotIndex===idx
+      if(kind==='line'||kind==='arrow'){
+        let line;try{line=a.getLine()}catch{return}
+        this.renderLineAnnotationOverlay(interaction,idx,line,bounds,scale,selected)
+        return
+      }
+      if(kind==='ink'){
+        let strokes=[];try{strokes=a.getInkList()}catch{}
+        this.renderInkAnnotationOverlay(interaction,idx,strokes,bounds,scale,selected)
+        return
+      }
       const [x0,y0,x1,y1]=pxRect(r,scale), box=document.createElement('div')
-      box.className=`annot-box ${this.selectedAnnot?.pageIndex===this.currentPage&&this.selectedAnnot?.annotIndex===idx?'selected':''}`
+      box.className=`annot-box ${selected?'selected':''}`
       Object.assign(box.style,{left:`${x0}px`,top:`${y0}px`,width:`${Math.max(4,x1-x0)}px`,height:`${Math.max(4,y1-y0)}px`}); box.dataset.annot=idx; interaction.append(box)
       box.addEventListener('pointerdown',e=>this.beginAnnotDrag(e,idx,r,bounds,scale))
-      box.addEventListener('click',e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx};this.renderInspector();this.renderStage()});box.addEventListener('dblclick',e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx};this.openAnnotationProperties()})
-      if(this.selectedAnnot?.pageIndex===this.currentPage&&this.selectedAnnot?.annotIndex===idx && a.hasRect?.()) {
+      box.addEventListener('click',e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx};this.renderInspector();this.renderStage()})
+      box.addEventListener('dblclick',e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx};this.openAnnotationProperties()})
+      if(selected && (a.hasRect?.() || kind==='rectangle')) {
         for(const c of ['nw','ne','sw','se']){const h=document.createElement('span');h.className=`annot-handle ${c}`;h.dataset.resize=c;box.append(h);h.addEventListener('pointerdown',e=>this.beginAnnotResize(e,idx,r,bounds,scale,c))}
       }
     })
+  }
+
+  renderLineAnnotationOverlay(layer,idx,line,bounds,scale,selected){
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('annot-vector-overlay');svg.dataset.annot=idx
+    svg.setAttribute('viewBox',`0 0 ${layer.clientWidth} ${layer.clientHeight}`)
+    const [[ax,ay],[bx,by]]=line
+    const x1=(ax-bounds[0])*scale,y1=(ay-bounds[1])*scale,x2=(bx-bounds[0])*scale,y2=(by-bounds[1])*scale
+    const hit=document.createElementNS(svg.namespaceURI,'line');hit.classList.add('annot-line-hit');hit.setAttribute('x1',x1);hit.setAttribute('y1',y1);hit.setAttribute('x2',x2);hit.setAttribute('y2',y2)
+    const vis=document.createElementNS(svg.namespaceURI,'line');vis.classList.add('annot-line-selection');vis.setAttribute('x1',x1);vis.setAttribute('y1',y1);vis.setAttribute('x2',x2);vis.setAttribute('y2',y2);if(!selected)vis.classList.add('hidden')
+    svg.append(hit,vis);layer.append(svg)
+    const choose=e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx}}
+    hit.addEventListener('pointerdown',e=>{choose(e);this.beginAnnotLineDrag(e,idx,line,bounds,scale,'move')})
+    hit.addEventListener('click',e=>{choose(e);this.renderInspector();this.renderStage()})
+    hit.addEventListener('dblclick',e=>{choose(e);this.openAnnotationProperties()})
+    if(selected){
+      ;[['p1',x1,y1],['p2',x2,y2]].forEach(([which,x,y])=>{const c=document.createElementNS(svg.namespaceURI,'circle');c.classList.add('annot-line-handle');c.dataset.endpoint=which;c.setAttribute('cx',x);c.setAttribute('cy',y);c.setAttribute('r',5);c.addEventListener('pointerdown',e=>this.beginAnnotLineDrag(e,idx,line,bounds,scale,which));svg.append(c)})
+    }
+  }
+
+  renderInkAnnotationOverlay(layer,idx,strokes,bounds,scale,selected){
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('annot-vector-overlay');svg.dataset.annot=idx
+    svg.setAttribute('viewBox',`0 0 ${layer.clientWidth} ${layer.clientHeight}`)
+    for(const stroke of strokes||[]){
+      if(!stroke?.length)continue
+      const pts=stroke.map(p=>`${(p[0]-bounds[0])*scale},${(p[1]-bounds[1])*scale}`).join(' ')
+      const hit=document.createElementNS(svg.namespaceURI,'polyline');hit.classList.add('annot-ink-hit');hit.setAttribute('points',pts)
+      const vis=document.createElementNS(svg.namespaceURI,'polyline');vis.classList.add('annot-ink-selection');vis.setAttribute('points',pts);if(!selected)vis.classList.add('hidden')
+      const choose=e=>{e.stopPropagation();this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx}}
+      hit.addEventListener('pointerdown',e=>{choose(e);this.beginAnnotInkDrag(e,idx,strokes,bounds,scale)})
+      hit.addEventListener('click',e=>{choose(e);this.renderInspector();this.renderStage()})
+      hit.addEventListener('dblclick',e=>{choose(e);this.openAnnotationProperties()})
+      svg.append(hit,vis)
+    }
+    layer.append(svg)
   }
 
   bindSingleInteraction(page,bounds,scale) {
@@ -1031,48 +1239,88 @@ export class PackDocFitApp {
     })
     layer.addEventListener('pointerup',async e=>{
       if(!this.dragDrawing||this.dragDrawing.pointerId!==e.pointerId)return
-      const d=this.dragDrawing;this.dragDrawing=null; await this.commitDrawing(d); this.renderInspector(); await this.renderStage(); this.renderSidebar();this.updateButtons()
+      const d=this.dragDrawing;this.dragDrawing=null
+      const created=await this.commitDrawing(d)
+      if(created) this.tool='select'
+      this.renderInspector(); await this.refreshCurrentAnnotationPage(); this.updateButtons()
     })
-    layer.addEventListener('click',()=>{ if(this.tool==='select'&&this.selectedAnnot){this.selectedAnnot=null;this.renderInspector();this.renderStage()} })
+    // Keep an existing annotation selected when empty page space is clicked.
+    // Escape, another annotation selection, or delete explicitly clears it.
   }
 
   showDrawPreview() {
     const layer=$('#interactionLayer',this.els.stageScroll), d=this.dragDrawing; if(!layer||!d)return
-    $('.draw-preview',layer)?.remove(); $('.ink-preview',layer)?.remove()
+    $('.draw-preview',layer)?.remove(); $('.ink-preview',layer)?.remove(); $('.line-preview',layer)?.remove()
     if(d.tool==='ink'){
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('ink-preview');svg.setAttribute('viewBox',`0 0 ${layer.clientWidth} ${layer.clientHeight}`)
-      const pl=document.createElementNS('http://www.w3.org/2000/svg','polyline'); const pts=d.points.map(p=>`${(p[0]-d.bounds[0])*d.scale},${(p[1]-d.bounds[1])*d.scale}`).join(' ');pl.setAttribute('points',pts);pl.setAttribute('fill','none');pl.setAttribute('stroke',this.annotStyle.color);pl.setAttribute('stroke-width',String(this.annotStyle.width));svg.append(pl);layer.append(svg);return
+      const pl=document.createElementNS(svg.namespaceURI,'polyline'); const pts=d.points.map(p=>`${(p[0]-d.bounds[0])*d.scale},${(p[1]-d.bounds[1])*d.scale}`).join(' ');pl.setAttribute('points',pts);pl.setAttribute('fill','none');pl.setAttribute('stroke',this.annotStyle.color);pl.setAttribute('stroke-width',String(Math.max(1,this.annotStyle.width*d.scale)));pl.setAttribute('stroke-linecap','round');pl.setAttribute('stroke-linejoin','round');svg.append(pl);layer.append(svg);return
+    }
+    if(d.tool==='line'||d.tool==='arrow'){
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('line-preview');svg.setAttribute('viewBox',`0 0 ${layer.clientWidth} ${layer.clientHeight}`)
+      const x1=(d.start[0]-d.bounds[0])*d.scale,y1=(d.start[1]-d.bounds[1])*d.scale,x2=(d.last[0]-d.bounds[0])*d.scale,y2=(d.last[1]-d.bounds[1])*d.scale
+      const line=document.createElementNS(svg.namespaceURI,'line');line.setAttribute('x1',x1);line.setAttribute('y1',y1);line.setAttribute('x2',x2);line.setAttribute('y2',y2);line.setAttribute('stroke',this.annotStyle.color);line.setAttribute('stroke-width',String(Math.max(1,this.annotStyle.width*d.scale)));line.setAttribute('stroke-linecap','round')
+      const pattern=dashPattern(this.annotStyle.lineStyle);if(pattern.length)line.setAttribute('stroke-dasharray',pattern.map(v=>v*d.scale).join(' '));svg.append(line)
+      if(d.tool==='arrow')this.appendArrowPreview(svg,x1,y1,x2,y2,d.scale)
+      layer.append(svg);return
     }
     const r=normalizeRect(d.start,d.last), pr=pxRect(r,d.scale), div=document.createElement('div');div.className='draw-preview';Object.assign(div.style,{left:`${pr[0]}px`,top:`${pr[1]}px`,width:`${Math.max(2,pr[2]-pr[0])}px`,height:`${Math.max(2,pr[3]-pr[1])}px`});layer.append(div)
   }
 
+  appendArrowPreview(svg,x1,y1,x2,y2,scale=1){
+    const angle=Math.atan2(y2-y1,x2-x1), size=Math.max(9,Number(this.annotStyle.width||2)*scale*4.5), spread=.52
+    const a=[x2-size*Math.cos(angle-spread),y2-size*Math.sin(angle-spread)], b=[x2-size*Math.cos(angle+spread),y2-size*Math.sin(angle+spread)]
+    if(this.annotStyle.arrowStyle==='open'){
+      const p=document.createElementNS(svg.namespaceURI,'polyline');p.setAttribute('points',`${a[0]},${a[1]} ${x2},${y2} ${b[0]},${b[1]}`);p.setAttribute('fill','none');p.setAttribute('stroke',this.annotStyle.color);p.setAttribute('stroke-width',String(Math.max(1,Number(this.annotStyle.width||2)*scale)));p.setAttribute('stroke-linecap','round');p.setAttribute('stroke-linejoin','round');svg.append(p)
+    }else{
+      const p=document.createElementNS(svg.namespaceURI,'polygon');p.setAttribute('points',`${x2},${y2} ${a[0]},${a[1]} ${b[0]},${b[1]}`);p.setAttribute('fill',this.annotStyle.color);svg.append(p)
+    }
+  }
+
   async commitDrawing(d) {
     const page=this.project.loadPage(this.currentPage)
+    let created=false, createdIndex=null
     try{
       const r=normalizeRect(d.start,d.last), [rw,rh]=rectSize(r)
-      if(d.tool!=='ink' && d.tool!=='text' && (rw<2||rh<2))return
-      this.withOperation(`Add ${d.tool} annotation`,()=>{
+      const length=Math.hypot(d.last[0]-d.start[0],d.last[1]-d.start[1])
+      if((d.tool==='line'||d.tool==='arrow')&&length<2)return false
+      if(d.tool==='ink'&&d.points.length<2)return false
+      if(!['ink','text','line','arrow'].includes(d.tool) && (rw<2||rh<2))return false
+      const textValue=d.tool==='text'?prompt(this.t('textPrompt')):null
+      if(d.tool==='text'&&!textValue)return false
+      this.withAnnotationOperation(`Add ${d.tool} annotation`,()=>{
         const c=hexToRgb(this.annotStyle.color); let a
         if(d.tool==='highlight'){
           a=page.createAnnotation('Highlight'); let quads=[]
           if(this.annotStyle.highlightTextOnly){
             let st; try{st=page.toStructuredText('preserve-spans');const data=JSON.parse(st.asJSON());for(const b of data.blocks||[])if(b.type==='text')for(const l of b.lines||[]){const q=l.bbox;if(!q)continue;const x=q.x??q[0],y=q.y??q[1],w=q.w??(q[2]-q[0]),h=q.h??(q[3]-q[1]);if(x<r[2]&&x+w>r[0]&&y<r[3]&&y+h>r[1])quads.push([x,y,x+w,y,x+w,y+h,x,y+h])}}finally{st?.destroy?.()}}
           if(!quads.length)quads=[[r[0],r[1],r[2],r[1],r[2],r[3],r[0],r[3]]]
-          a.setQuadPoints(quads);a.setColor(c);a.setOpacity(this.annotStyle.opacity)
+          a.setQuadPoints(quads);a.setColor(c);a.setOpacity(this.annotStyle.opacity);setAnnotMeta(a,{tool:'highlight'})
         } else if(d.tool==='rectangle'){
-          a=page.createAnnotation('Square');a.setRect(r);a.setColor(c);a.setBorderWidth(this.annotStyle.width);a.setOpacity(this.annotStyle.opacity)
+          a=this.createRectangleAnnotation(page,r,c)
         } else if(d.tool==='line'||d.tool==='arrow'){
-          a=page.createAnnotation('Line');a.setLine(d.start,d.last);a.setColor(c);a.setBorderWidth(this.annotStyle.width);a.setOpacity(this.annotStyle.opacity);a.setLineEndingStyles('None',d.tool==='arrow'?'OpenArrow':'None')
+          a=page.createAnnotation('Line');a.setLine(d.start,d.last);a.setColor(c);a.setBorderWidth(this.annotStyle.width);a.setOpacity(this.annotStyle.opacity);applyAnnotDash(a,this.annotStyle.lineStyle);a.setLineEndingStyles('None',d.tool==='arrow'?(this.annotStyle.arrowStyle==='open'?'OpenArrow':'ClosedArrow'):'None');setAnnotMeta(a,{tool:d.tool,dash:this.annotStyle.lineStyle,arrow:this.annotStyle.arrowStyle})
         } else if(d.tool==='ink'){
-          if(d.points.length<2)return;a=page.createAnnotation('Ink');a.setInkList([d.points]);a.setColor(c);a.setBorderWidth(this.annotStyle.width);a.setOpacity(this.annotStyle.opacity)
+          a=page.createAnnotation('Ink');a.setInkList([d.points]);a.setColor(c);a.setBorderWidth(this.annotStyle.width);a.setOpacity(this.annotStyle.opacity);setAnnotMeta(a,{tool:'ink'})
         } else if(d.tool==='text'){
-          const text=prompt(this.t('textPrompt'));if(!text)return;a=page.createAnnotation('FreeText');const rr=rw<10||rh<10?[r[0],r[1],r[0]+180,r[1]+48]:r;a.setRect(rr);a.setContents(text);a.setDefaultAppearance('Helv',this.annotStyle.fontSize,c);a.setOpacity(this.annotStyle.opacity);a.setSubject('PackDocFit Text')
+          a=page.createAnnotation('FreeText');const rr=rw<10||rh<10?[r[0],r[1],r[0]+180,r[1]+48]:r;a.setRect(rr);a.setContents(textValue);a.setDefaultAppearance('Helv',this.annotStyle.fontSize,c);a.setOpacity(this.annotStyle.opacity);setAnnotMeta(a,{tool:'text'})
         }
-        if(a){a.setSubject?.(`PackDocFit ${d.tool}`);a.update()}
-        page.update()
+        if(a){a.update();page.update();created=true;try{createdIndex=page.getAnnotations().length-1}catch{}}
       })
-      this.pageMeta[this.currentPage].modified=true
+      if(created){
+        this.pageMeta[this.currentPage].modified=true
+        if(Number.isInteger(createdIndex))this.selectedAnnot={pageIndex:this.currentPage,annotIndex:createdIndex}
+      }
+      return created
     } finally { page.destroy?.() }
+  }
+
+  createRectangleAnnotation(page,r,color,style=this.annotStyle){
+    const rounded=style.rectCornerStyle==='rounded'
+    const a=page.createAnnotation(rounded?'Ink':'Square')
+    if(rounded)a.setInkList([roundedRectPoints(r)]);else a.setRect(r)
+    a.setColor(color);a.setBorderWidth(style.width);a.setOpacity(style.opacity);applyAnnotDash(a,style.lineStyle)
+    setAnnotMeta(a,{tool:'rectangle',corner:rounded?'rounded':'square',dash:style.lineStyle})
+    return a
   }
 
   getSelectedAnnotation() {
@@ -1080,6 +1328,64 @@ export class PackDocFitApp {
     const page=this.project.loadPage(this.currentPage)
     const arr=page.getAnnotations(); const a=arr[this.selectedAnnot.annotIndex]
     return {page,annot:a,index:this.selectedAnnot.annotIndex}
+  }
+
+  beginAnnotLineDrag(e,idx,origLine,bounds,scale,mode='move') {
+    if(this.tool!=='select')return
+    e.stopPropagation();e.preventDefault();const layer=$('#interactionLayer',this.els.stageScroll);layer.setPointerCapture(e.pointerId)
+    this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx};const start=pagePointFromEvent(e,layer,bounds)
+    this.dragAnnot={kind:'line',mode,pointerId:e.pointerId,idx,start,last:start,origLine:origLine.map(p=>[...p]),bounds,scale}
+    const move=ev=>{if(ev.pointerId!==e.pointerId)return;this.dragAnnot.last=pagePointFromEvent(ev,layer,bounds);this.previewAnnotLineDrag()}
+    const up=ev=>{if(ev.pointerId!==e.pointerId)return;layer.removeEventListener('pointermove',move);layer.removeEventListener('pointerup',up);this.commitAnnotLineDrag()}
+    layer.addEventListener('pointermove',move);layer.addEventListener('pointerup',up)
+  }
+
+  previewAnnotLineDrag(){
+    const d=this.dragAnnot;if(!d||d.kind!=='line')return
+    const [[x1,y1],[x2,y2]]=this.draggedLinePoints(d),svg=$(`.annot-vector-overlay[data-annot="${d.idx}"]`,this.els.stageScroll);if(!svg)return
+    const px=p=>[(p[0]-d.bounds[0])*d.scale,(p[1]-d.bounds[1])*d.scale]
+    const a=px([x1,y1]),b=px([x2,y2]);$$('line',svg).forEach(l=>{l.setAttribute('x1',a[0]);l.setAttribute('y1',a[1]);l.setAttribute('x2',b[0]);l.setAttribute('y2',b[1])})
+    const handles=$$('.annot-line-handle',svg);if(handles[0]){handles[0].setAttribute('cx',a[0]);handles[0].setAttribute('cy',a[1])}if(handles[1]){handles[1].setAttribute('cx',b[0]);handles[1].setAttribute('cy',b[1])}
+  }
+
+  draggedLinePoints(d){
+    const p1=[...d.origLine[0]],p2=[...d.origLine[1]],dx=d.last[0]-d.start[0],dy=d.last[1]-d.start[1]
+    if(d.mode==='p1'){p1[0]+=dx;p1[1]+=dy}else if(d.mode==='p2'){p2[0]+=dx;p2[1]+=dy}else{p1[0]+=dx;p1[1]+=dy;p2[0]+=dx;p2[1]+=dy}
+    const clampPt=p=>[clamp(p[0],d.bounds[0],d.bounds[2]),clamp(p[1],d.bounds[1],d.bounds[3])]
+    return[clampPt(p1),clampPt(p2)]
+  }
+
+  async commitAnnotLineDrag(){
+    const d=this.dragAnnot;if(!d||d.kind!=='line')return;this.dragAnnot=null
+    const [p1,p2]=this.draggedLinePoints(d),page=this.project.loadPage(this.currentPage)
+    try{const a=page.getAnnotations()[d.idx];if(!a)return;this.withAnnotationOperation('Edit line annotation',()=>{a.setLine(p1,p2);a.update();page.update()});this.pageMeta[this.currentPage].modified=true}finally{page.destroy?.()}
+    await this.refreshCurrentAnnotationPage()
+  }
+
+  beginAnnotInkDrag(e,idx,strokes,bounds,scale){
+    if(this.tool!=='select')return
+    e.stopPropagation();e.preventDefault();const layer=$('#interactionLayer',this.els.stageScroll);layer.setPointerCapture(e.pointerId);this.selectedAnnot={pageIndex:this.currentPage,annotIndex:idx}
+    const start=pagePointFromEvent(e,layer,bounds);this.dragAnnot={kind:'ink',pointerId:e.pointerId,idx,start,last:start,strokes:strokes.map(st=>st.map(p=>[...p])),bounds,scale}
+    const move=ev=>{if(ev.pointerId!==e.pointerId)return;this.dragAnnot.last=pagePointFromEvent(ev,layer,bounds);this.previewAnnotInkDrag()}
+    const up=ev=>{if(ev.pointerId!==e.pointerId)return;layer.removeEventListener('pointermove',move);layer.removeEventListener('pointerup',up);this.commitAnnotInkDrag()}
+    layer.addEventListener('pointermove',move);layer.addEventListener('pointerup',up)
+  }
+
+  draggedInkStrokes(d){
+    let dx=d.last[0]-d.start[0],dy=d.last[1]-d.start[1],pts=d.strokes.flat();if(!pts.length)return d.strokes
+    const xs=pts.map(p=>p[0]+dx),ys=pts.map(p=>p[1]+dy);if(Math.min(...xs)<d.bounds[0])dx+=d.bounds[0]-Math.min(...xs);if(Math.max(...xs)>d.bounds[2])dx+=d.bounds[2]-Math.max(...xs);if(Math.min(...ys)<d.bounds[1])dy+=d.bounds[1]-Math.min(...ys);if(Math.max(...ys)>d.bounds[3])dy+=d.bounds[3]-Math.max(...ys)
+    return d.strokes.map(st=>st.map(p=>[p[0]+dx,p[1]+dy]))
+  }
+
+  previewAnnotInkDrag(){
+    const d=this.dragAnnot;if(!d||d.kind!=='ink')return;const strokes=this.draggedInkStrokes(d),svg=$(`.annot-vector-overlay[data-annot="${d.idx}"]`,this.els.stageScroll);if(!svg)return
+    const polylines=$$('polyline',svg);strokes.forEach((st,i)=>{const pts=st.map(p=>`${(p[0]-d.bounds[0])*d.scale},${(p[1]-d.bounds[1])*d.scale}`).join(' ');if(polylines[i*2])polylines[i*2].setAttribute('points',pts);if(polylines[i*2+1])polylines[i*2+1].setAttribute('points',pts)})
+  }
+
+  async commitAnnotInkDrag(){
+    const d=this.dragAnnot;if(!d||d.kind!=='ink')return;this.dragAnnot=null;const strokes=this.draggedInkStrokes(d),page=this.project.loadPage(this.currentPage)
+    try{const a=page.getAnnotations()[d.idx];if(!a)return;this.withAnnotationOperation('Move ink annotation',()=>{a.setInkList(strokes);a.update();page.update()});this.pageMeta[this.currentPage].modified=true}finally{page.destroy?.()}
+    await this.refreshCurrentAnnotationPage()
   }
 
   beginAnnotDrag(e,idx,origRect,bounds,scale) {
@@ -1125,7 +1431,7 @@ export class PackDocFitApp {
     const page=this.project.loadPage(this.currentPage)
     try{
       const a=page.getAnnotations()[d.idx];if(!a)return
-      this.withOperation(d.kind==='move'?'Move annotation':'Resize annotation',()=>{
+      this.withAnnotationOperation(d.kind==='move'?'Move annotation':'Resize annotation',()=>{
         if(d.kind==='move'){
           const dx=d.last[0]-d.start[0],dy=d.last[1]-d.start[1];this.applyAnnotTranslation(a,d.snapshot,dx,dy)
         } else {
@@ -1136,7 +1442,7 @@ export class PackDocFitApp {
       })
       this.pageMeta[this.currentPage].modified=true
     } finally {page.destroy?.()}
-    this.updateAll(true)
+    this.refreshCurrentAnnotationPage()
   }
 
   applyAnnotTranslation(a,s,dx,dy) {
@@ -1159,19 +1465,42 @@ export class PackDocFitApp {
 
   deleteSelectedAnnotation() {
     const x=this.getSelectedAnnotation();if(!x)return
-    try{this.withOperation('Delete annotation',()=>{x.page.deleteAnnotation(x.annot);x.page.update()});this.pageMeta[this.currentPage].modified=true;this.selectedAnnot=null}finally{x.page.destroy?.()}
-    this.updateAll(true)
+    try{this.withAnnotationOperation('Delete annotation',()=>{x.page.deleteAnnotation(x.annot);x.page.update()});this.pageMeta[this.currentPage].modified=true;this.selectedAnnot=null}finally{x.page.destroy?.()}
+    this.refreshCurrentAnnotationPage()
   }
 
-  updateSelectedAnnotationStyle() {
+  updateSelectedAnnotationStyle(style=this.annotStyle) {
     const x=this.getSelectedAnnotation();if(!x)return
+    let newIndex=x.index
     try{
-      this.withOperation('Change annotation style',()=>{
-        const a=x.annot,c=hexToRgb(this.annotStyle.color)
-        try{a.setColor(c)}catch{};try{a.setOpacity(this.annotStyle.opacity)}catch{};try{if(a.hasBorder?.())a.setBorderWidth(this.annotStyle.width)}catch{};try{if(a.getType()==='FreeText')a.setDefaultAppearance('Helv',this.annotStyle.fontSize,c)}catch{};a.update();x.page.update()
-      });this.pageMeta[this.currentPage].modified=true
+      const kind=this.annotationKind(x.annot),meta=parseAnnotMeta(x.annot),c=hexToRgb(style.color),bounds=x.annot.getBounds()
+      this.withAnnotationOperation('Change annotation style',()=>{
+        let a=x.annot
+        if(kind==='rectangle'){
+          const wantRounded=style.rectCornerStyle==='rounded',isRounded=String(a.getType?.())==='Ink'&&meta.tool==='rectangle'
+          if(wantRounded!==isRounded){
+            x.page.deleteAnnotation(a)
+            a=this.createRectangleAnnotation(x.page,bounds,c,style);a.update();newIndex=x.page.getAnnotations().length-1
+          }
+        }
+        try{a.setColor(c)}catch{};try{a.setOpacity(style.opacity)}catch{};try{if(a.hasBorder?.())a.setBorderWidth(style.width)}catch{}
+        if(kind==='line'||kind==='arrow'||kind==='rectangle')applyAnnotDash(a,style.lineStyle)
+        if(kind==='line'||kind==='arrow'){try{a.setLineEndingStyles('None',kind==='arrow'?(style.arrowStyle==='open'?'OpenArrow':'ClosedArrow'):'None')}catch{};setAnnotMeta(a,{...parseAnnotMeta(a),tool:kind,dash:style.lineStyle,arrow:style.arrowStyle})}
+        else if(kind==='rectangle')setAnnotMeta(a,{...parseAnnotMeta(a),tool:'rectangle',corner:style.rectCornerStyle,dash:style.lineStyle})
+        else if(kind==='text'){try{a.setDefaultAppearance('Helv',style.fontSize,c)}catch{}}
+        a.update();x.page.update()
+      });this.pageMeta[this.currentPage].modified=true;this.selectedAnnot={pageIndex:this.currentPage,annotIndex:newIndex}
     }finally{x.page.destroy?.()}
-    this.saveSettings();this.updateAll(true)
+    this.refreshCurrentAnnotationPage()
+  }
+
+  async refreshCurrentAnnotationPage(){
+    // Repaint only the active one-page surface plus its sidebar thumbnail.
+    // The full PDF.js project snapshot is refreshed lazily when continuous view returns.
+    if(this.viewMode==='single')await this.renderStage()
+    this.syncSidebarSelection();this.syncStageSelection();this.updateButtons()
+    const item=$(`.page-item[data-page="${this.currentPage}"]`,this.els.pageList)
+    if(item){const canvas=$('canvas',item),loading=$('.thumb-loading',item);if(canvas){canvas.dataset.renderState='loading';try{const target=Math.min(Number(this.settings.thumbnailWidth)||150,Math.max(92,this.els.sidebar.clientWidth-28));await this.renderMupdfFallbackToCanvas(this.currentPage,canvas,{cssWidth:target,maxDpr:1.5});canvas.dataset.renderState='done';loading?.remove();item.classList.add('rendered')}catch(e){console.warn('annotation thumbnail refresh',e);canvas.dataset.renderState='error'}}}
   }
 
   async exportSelectedImage(fmt='png') {
@@ -1187,17 +1516,39 @@ export class PackDocFitApp {
 
   renderInspector() { /* Right inspector removed; contextual properties live in dialogs/settings. */ }
 
-  annotationStyleFields(settingsMode=false) {
+  annotationStyleFrom(a,kind){
+    const style={...this.annotStyle},meta=parseAnnotMeta(a)
+    try{const c=a.getColor?.();if(c?.length)style.color=rgbToHex(c)}catch{}
+    try{const o=a.getOpacity?.();if(Number.isFinite(o))style.opacity=o}catch{}
+    try{const w=a.getBorderWidth?.();if(Number.isFinite(w)&&w>0)style.width=w}catch{}
+    if(['line','arrow','rectangle'].includes(kind)){
+      try{const n=a.getBorderDashCount?.()||0;if(n>0){const first=Number(a.getBorderDashItem?.(0))||0;style.lineStyle=first<=3?'dotted':'dashed'}else style.lineStyle='solid'}catch{}
+    }
+    if(kind==='arrow'){
+      try{const e=a.getLineEndingStyles?.();style.arrowStyle=e?.end==='OpenArrow'?'open':'closed'}catch{style.arrowStyle=meta.arrow==='open'?'open':'closed'}
+    }
+    if(kind==='rectangle')style.rectCornerStyle=meta.corner==='rounded'?'rounded':'square'
+    if(kind==='text')try{const da=a.getDefaultAppearance?.();if(Number.isFinite(da?.size))style.fontSize=da.size}catch{}
+    return style
+  }
+
+  annotationStyleFields(settingsMode=false, kind='all') {
     const hex=String(this.annotStyle.color||'#ffcc33').toUpperCase()
     const pct=Math.round(clamp(Number(this.annotStyle.opacity)||0,0,1)*100)
+    const showLine=['all','line','arrow','rectangle'].includes(kind),showArrow=['all','arrow'].includes(kind),showCorner=['all','rectangle'].includes(kind),showText=['all','text'].includes(kind)
+    const extraPlain=`${showLine?`<div class="field-row"><label>${this.t('lineStyle')}</label><select data-style="lineStyle"><option value="solid" ${this.annotStyle.lineStyle==='solid'?'selected':''}>${this.t('solid')}</option><option value="dashed" ${this.annotStyle.lineStyle==='dashed'?'selected':''}>${this.t('dashed')}</option><option value="dotted" ${this.annotStyle.lineStyle==='dotted'?'selected':''}>${this.t('dotted')}</option></select></div>`:''}${showCorner?`<div class="field-row"><label>${this.t('cornerStyle')}</label><select data-style="rectCornerStyle"><option value="square" ${this.annotStyle.rectCornerStyle==='square'?'selected':''}>${this.t('squareCorners')}</option><option value="rounded" ${this.annotStyle.rectCornerStyle==='rounded'?'selected':''}>${this.t('roundedCorners')}</option></select></div>`:''}${showArrow?`<div class="field-row"><label>${this.t('arrowhead')}</label><select data-style="arrowStyle"><option value="closed" ${this.annotStyle.arrowStyle==='closed'?'selected':''}>${this.t('closedArrow')}</option><option value="open" ${this.annotStyle.arrowStyle==='open'?'selected':''}>${this.t('openArrow')}</option></select></div>`:''}${showText?`<div class="field-row"><label>${this.t('textSize')}</label><span class="style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></span></div>`:''}`
     if(!settingsMode) return `<div class="field-row"><label>${this.t('color')}</label><div class="style-color-control"><input type="color" data-style="color" value="${esc(this.annotStyle.color)}"><input class="style-hex" type="text" data-style-peer="colorHex" value="${esc(hex)}" maxlength="7" spellcheck="false"></div></div>
       <div class="field-row"><label>${this.t('opacity')}</label><div class="style-range-control"><input type="range" data-style="opacity" min="0" max="1" step="0.01" value="${this.annotStyle.opacity}"><span class="style-number-unit"><input type="number" data-style-peer="opacityPercent" min="0" max="100" step="1" value="${pct}"><span>%</span></span></div></div>
-      <div class="field-row"><label>${this.t('lineWidth')}</label><span class="style-number-unit"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"><span>pt</span></span></div>
-      <div class="field-row"><label>${this.t('textSize')}</label><span class="style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></span></div>`
-    return `<div class="settings-row"><label>${this.t('color')}</label><div class="settings-control settings-value-wide style-color-control"><input class="settings-color" type="color" data-style="color" value="${esc(this.annotStyle.color)}"><input class="style-hex" type="text" data-style-peer="colorHex" value="${esc(hex)}" maxlength="7" spellcheck="false"></div></div>
-      <div class="settings-row"><label>${this.t('opacity')}</label><div class="settings-control settings-value-wide style-range-control"><input class="settings-range" type="range" data-style="opacity" min="0" max="1" step="0.01" value="${this.annotStyle.opacity}"><span class="style-number-unit"><input type="number" data-style-peer="opacityPercent" min="0" max="100" step="1" value="${pct}"><span>%</span></span></div></div>
+      <div class="field-row"><label>${this.t('lineWidth')}</label><span class="style-number-unit"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"><span>pt</span></span></div>${extraPlain}`
+    return `<div class="settings-row"><label>${this.t('color')}</label><div class="settings-control settings-value-wide style-color-control"><input class="settings-color" type="color" data-style="color" value="${esc(this.annotStyle.color)}" aria-label="${this.t('color')}"><input class="style-hex" type="text" data-style-peer="colorHex" value="${esc(hex)}" maxlength="7" spellcheck="false" aria-label="${this.t('color')} HEX"></div></div>
+      <div class="settings-row"><label>${this.t('opacity')}</label><div class="settings-control settings-value-wide style-range-control"><input class="settings-range" type="range" data-style="opacity" min="0" max="1" step="0.01" value="${this.annotStyle.opacity}" aria-label="${this.t('opacity')}"><span class="style-number-unit"><input type="number" data-style-peer="opacityPercent" min="0" max="100" step="1" value="${pct}" aria-label="${this.t('opacity')}"><span>%</span></span></div></div>
       <div class="settings-row"><label>${this.t('lineWidth')}</label><div class="settings-control settings-value-compact style-number-unit"><input type="number" data-style="width" min="0.5" max="20" step="0.5" value="${this.annotStyle.width}"><span>pt</span></div></div>
-      <div class="settings-row"><label>${this.t('textSize')}</label><div class="settings-control settings-value-compact style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></div></div>`
+      <div class="settings-row"><label>${this.t('textSize')}</label><div class="settings-control settings-value-compact style-number-unit"><input type="number" data-style="fontSize" min="6" max="96" step="1" value="${this.annotStyle.fontSize}"><span>pt</span></div></div>
+      <details class="settings-advanced"><summary>${this.t('advancedAnnotationSettings')}</summary><div class="settings-advanced-body">
+        <div class="settings-row"><label>${this.t('lineStyle')}</label><div class="settings-control settings-value-standard"><select data-style="lineStyle"><option value="solid" ${this.annotStyle.lineStyle==='solid'?'selected':''}>${this.t('solid')}</option><option value="dashed" ${this.annotStyle.lineStyle==='dashed'?'selected':''}>${this.t('dashed')}</option><option value="dotted" ${this.annotStyle.lineStyle==='dotted'?'selected':''}>${this.t('dotted')}</option></select></div></div>
+        <div class="settings-row"><label>${this.t('cornerStyle')}</label><div class="settings-control settings-value-standard"><select data-style="rectCornerStyle"><option value="square" ${this.annotStyle.rectCornerStyle==='square'?'selected':''}>${this.t('squareCorners')}</option><option value="rounded" ${this.annotStyle.rectCornerStyle==='rounded'?'selected':''}>${this.t('roundedCorners')}</option></select></div></div>
+        <div class="settings-row"><label>${this.t('arrowhead')}</label><div class="settings-control settings-value-standard"><select data-style="arrowStyle"><option value="closed" ${this.annotStyle.arrowStyle==='closed'?'selected':''}>${this.t('closedArrow')}</option><option value="open" ${this.annotStyle.arrowStyle==='open'?'selected':''}>${this.t('openArrow')}</option></select></div></div>
+      </div></details>`
   }
 
   wireAnnotationStyleFields(root) {
@@ -1216,14 +1567,18 @@ export class PackDocFitApp {
 
   openAnnotationProperties() {
     const x=this.getSelectedAnnotation(); if(!x)return this.toast(this.t('noAnnotation'),true)
-    let type=''; try{type=x.annot.getType()}finally{x.page.destroy?.()}
+    let type='',kind='all',editStyle
+    try{type=x.annot.getType();kind=this.annotationKind(x.annot);editStyle=this.annotationStyleFrom(x.annot,kind)}finally{x.page.destroy?.()}
+    const creationDefaults=this.annotStyle
+    this.annotStyle=editStyle
     this.modal(this.t('annotationProperties'),`
       <div class="inspector-section" style="padding:0;border:0"><h3>${this.t('selectedAnnotation')}</h3>
-      <div class="field-row"><label>${this.t('type')}</label><div>${esc(type)}</div></div>${this.annotationStyleFields()}</div>`,
-      [{label:this.t('cancel')},{label:this.t('delete'),onClick:()=>{this.deleteSelectedAnnotation();return true}},{label:this.t('apply'),primary:true,onClick:m=>{
-        $$('[data-style]',m).forEach(inp=>{const k=inp.dataset.style;this.annotStyle[k]=inp.type==='range'||inp.type==='number'?Number(inp.value):inp.type==='checkbox'?inp.checked:inp.value})
-        this.settings.annotStyle=this.annotStyle;this.saveSettings();this.updateSelectedAnnotationStyle();return true
-      }}],m=>this.wireAnnotationStyleFields(m))
+      <div class="field-row"><label>${this.t('type')}</label><div>${esc(type)}</div></div>${this.annotationStyleFields(false,kind)}</div>`,
+      [{label:this.t('cancel')},{label:this.t('delete'),onClick:()=>{this.annotStyle=creationDefaults;this.deleteSelectedAnnotation();return true}},{label:this.t('apply'),primary:true,onClick:m=>{
+        const style={...editStyle}
+        $$('[data-style]',m).forEach(inp=>{const k=inp.dataset.style;style[k]=inp.type==='range'||inp.type==='number'?Number(inp.value):inp.type==='checkbox'?inp.checked:inp.value})
+        this.annotStyle=creationDefaults;this.updateSelectedAnnotationStyle(style);return true
+      }}],m=>this.wireAnnotationStyleFields(m),()=>{this.annotStyle=creationDefaults})
   }
 
   openFitDialog() {
@@ -1264,7 +1619,7 @@ export class PackDocFitApp {
         <section class="settings-group">
           <h3>${this.t('generalSettings')}</h3>
           <div class="settings-row"><label for="setLanguage">${this.t('language')}</label><div class="settings-control settings-value-standard"><select id="setLanguage">${langOptions}</select></div></div>
-          <div class="settings-row"><label for="setTheme">${this.t('theme')}</label><div class="settings-control settings-value-standard"><select id="setTheme"><option value="system" ${s.theme==='system'?'selected':''}>${this.t('system')}</option><option value="light" ${s.theme==='light'?'selected':''}>${this.t('light')}</option><option value="dark" ${s.theme==='dark'?'selected':''}>${this.t('dark')}</option></select></div></div>
+          <div class="settings-row"><label for="setTheme">${this.t('theme')}</label><div class="settings-control settings-value-standard"><select id="setTheme"><option value="system" ${s.theme==='system'?'selected':''}>${this.t('system')}</option><option value="light" ${s.theme==='light'?'selected':''}>${this.t('light')}</option><option value="dark" ${s.theme==='dark'?'selected':''}>${this.t('dark')}</option><option value="black" ${s.theme==='black'?'selected':''}>${this.t('black')}</option></select></div></div>
         </section>
 
         <section class="settings-group">
@@ -1275,7 +1630,7 @@ export class PackDocFitApp {
 
         <section class="settings-group">
           <h3>${this.t('annotations')}</h3>
-          <div class="settings-row settings-row-help"><label for="setTextOnly">${this.t('highlightSetting')}</label><div class="settings-control settings-toggle-control"><label class="settings-check"><input id="setTextOnly" type="checkbox" ${this.annotStyle.highlightTextOnly?'checked':''}><span>${this.t('preferTextLayer')}</span></label></div><p class="settings-help">${this.t('highlightHelp')}</p></div>
+          <div class="settings-row settings-row-help"><label for="setTextOnly">${this.t('highlightSetting')}</label><div class="settings-control settings-toggle-control"><label class="settings-switch"><input id="setTextOnly" type="checkbox" role="switch" ${this.annotStyle.highlightTextOnly?'checked':''} aria-label="${this.t('preferTextLayer')}"><span>${this.t('preferTextLayer')}</span></label></div><p class="settings-help">${this.t('highlightHelp')}</p></div>
           <div class="settings-subheading">${this.t('annotationDefaults')}</div>
           ${this.annotationStyleFields(true)}
         </section>
@@ -1304,16 +1659,16 @@ export class PackDocFitApp {
         quality.addEventListener('change',syncQuality);syncQuality()
         $('#exportSettings',m).onclick=()=>downloadBytes(new TextEncoder().encode(JSON.stringify(this.settings,null,2)),'PackDocFit-settings.json','application/json')
         $('#importSettings',m).onclick=()=>$('#settingsFile',m).click()
-        $('#settingsFile',m).onchange=async e=>{try{const obj=JSON.parse(await e.target.files[0].text());this.settings={...this.settings,...obj,annotStyle:{...this.annotStyle,...(obj.annotStyle||{})}};this.annotStyle=this.settings.annotStyle;this.language=this.settings.language||this.language;this.saveSettings();this.applyTheme();m.remove();this.buildShell();this.updateAll();this.toast(this.t('settingsImported'))}catch(err){this.fail(err)}}
+        $('#settingsFile',m).onchange=async e=>{try{const obj=JSON.parse(await e.target.files[0].text());this.settings={...this.settings,...obj,annotStyle:{...this.annotStyle,...(obj.annotStyle||{})}};this.annotStyle=this.settings.annotStyle;this.language=this.settings.language||this.language;this.saveSettings();this.applyTheme();$('[data-close]',m)?.click();this.buildShell();this.updateAll();this.toast(this.t('settingsImported'))}catch(err){this.fail(err)}}
       })
   }
 
   openAbout() {
-    const version='0.1.5'
+    const version=APP_VERSION
     this.modal(this.t('about'),`<div class="about-panel">
       <img class="about-app-icon" src="./assets/app_icon.png" alt="PackDocFit">
       <h2>PackDocFit</h2>
-      <div class="about-subtitle">${this.t('appSubtitle')} · v${version}</div>
+      <div class="about-subtitle">${this.t('appSubtitle')} · v${version} · Build ${APP_BUILD}</div>
       <p class="about-description">${this.t('aboutBody')}</p>
       <div class="about-actions">
         <button class="about-action" data-about-action="mail">${icon('mail')}<span>${this.t('contactDeveloper')}</span></button>
@@ -1327,12 +1682,12 @@ export class PackDocFitApp {
       $('[data-about-action="mail"]',m).onclick=()=>{location.href='mailto:creative2ya@gmail.com?subject=PackDocFit%20feedback'}
       $('[data-about-action="github"]',m).onclick=()=>window.open('https://github.com/Bak2ya/PackDocFit','_blank','noopener,noreferrer')
       $('[data-about-action="windows"]',m).onclick=()=>window.open('https://github.com/Bak2ya/PackDocFit/releases','_blank','noopener,noreferrer')
-      $('[data-about-action="help"]',m).onclick=()=>this.openHelp()
+      $('[data-about-action="help"]',m).onclick=()=>{$('[data-close]',m)?.click();this.openHelp()}
     })
   }
 
   openHelp() {
-    const mod=/Mac|iPhone|iPad|iPod/i.test(navigator.platform||navigator.userAgent)?'⌘':'Ctrl'
+    const mod=this.modKey()
     const shortcuts=[
       [`${mod}+N`,this.t('newProject')],[`${mod}+O`,this.t('addFiles')],[`${mod}+S`,this.t('save')],[`${mod}+Shift+S`,this.t('saveAs')],
       [`${mod}+Z`,this.t('undo')],[`${mod}+Shift+Z / ${mod}+Y`,this.t('redo')],[`${mod}+A`,this.t('selectAllPages')],[`${mod}+C`,this.t('copyPages')],
@@ -1356,10 +1711,32 @@ export class PackDocFitApp {
       compare:[[this.t('sideBySide'),'compareH'],[this.t('vertical'),'compareV'],[this.t('overlay'),'compareO']],
       settings:[[this.t('settings'),'settings'],[this.t('usageGuide'),'help'],[this.t('about'),'about']],
     }
-    const items=menus[kind]||[]; const r=anchor.getBoundingClientRect(); const pop=document.createElement('div');pop.style.cssText=`position:fixed;left:${r.left}px;top:${r.bottom+3}px;z-index:800;min-width:190px;padding:5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)`
-    pop.innerHTML=items.map(([l,a])=>`<button data-pop="${a}" style="display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--text);padding:7px 9px;border-radius:5px;cursor:pointer;font-size:12px">${esc(l)}</button>`).join('')
-    document.body.append(pop); $$('[data-pop]',pop).forEach(b=>{b.onmouseenter=()=>b.style.background='var(--panel-2)';b.onmouseleave=()=>b.style.background='transparent';b.onclick=async()=>{pop.remove();await this.menuAction(b.dataset.pop)}})
-    const close=e=>{if(!pop.contains(e.target)&&e.target!==anchor){pop.remove();document.removeEventListener('pointerdown',close,true)}};setTimeout(()=>document.addEventListener('pointerdown',close,true),0)
+    if(kind==='overflow'){
+      const all=[]
+      for(const [groupKey,labelKey] of [['file','file'],['edit','edit'],['page','page'],['view','view'],['compare','compare'],['settings','settings']]){
+        for(const [label,action] of menus[groupKey]) all.push([`${this.t(labelKey)} · ${label}`,action])
+      }
+      menus.overflow=all
+    }
+    document.querySelector('.menu-popover')?.remove()
+    const items=menus[kind]||[]; const r=anchor.getBoundingClientRect(); const pop=document.createElement('div');pop.className='menu-popover';pop.setAttribute('role','menu');pop.style.left=`${Math.min(r.left,window.innerWidth-230)}px`;pop.style.top=`${Math.min(r.bottom+3,window.innerHeight-20)}px`
+    pop.innerHTML=items.map(([l,a])=>`<button type="button" role="menuitem" data-pop="${a}">${esc(l)}</button>`).join('')
+    document.body.append(pop);anchor.setAttribute('aria-expanded','true')
+    const buttons=$$('[role="menuitem"]',pop)
+    const close=(restore=false)=>{pop.remove();anchor.setAttribute('aria-expanded','false');document.removeEventListener('pointerdown',outside,true);if(restore)anchor.focus()}
+    const outside=e=>{if(!pop.contains(e.target)&&e.target!==anchor)close(false)}
+    buttons.forEach(b=>b.onclick=async()=>{close(false);await this.menuAction(b.dataset.pop)})
+    pop.addEventListener('keydown',e=>{
+      const active=Math.max(0,buttons.indexOf(document.activeElement))
+      if(e.key==='ArrowDown'){e.preventDefault();buttons[(active+1)%buttons.length]?.focus()}
+      else if(e.key==='ArrowUp'){e.preventDefault();buttons[(active-1+buttons.length)%buttons.length]?.focus()}
+      else if(e.key==='Home'){e.preventDefault();buttons[0]?.focus()}
+      else if(e.key==='End'){e.preventDefault();buttons.at(-1)?.focus()}
+      else if(e.key==='Escape'){e.preventDefault();close(true)}
+      else if(e.key==='Tab'){close(false)}
+    })
+    setTimeout(()=>document.addEventListener('pointerdown',outside,true),0)
+    buttons[0]?.focus()
   }
 
   zoomStage(factor) {
@@ -1395,7 +1772,7 @@ export class PackDocFitApp {
     else if(mod&&k==='v'&&!typing&&this.clipboardBytes){e.preventDefault();this.pastePages()}
     else if(mod&&k==='0'){e.preventDefault();this.zoom=1;this.setViewMode('single')}
     else if((e.key==='Delete'||e.key==='Backspace')&&!typing){e.preventDefault();if(this.selectedAnnot)this.deleteSelectedAnnotation();else this.deleteSelectedPages()}
-    else if(e.key==='Escape'){this.selectedAnnot=null;this.dragDrawing=null;this.tool='select';window.getSelection()?.removeAllRanges();this.updateAll()}
+    else if(e.key==='Escape'){this.selectedAnnot=null;this.dragDrawing=null;this.dragAnnot=null;this.tool='select';window.getSelection()?.removeAllRanges();if(this.viewMode==='single')this.renderStage();else this.updateAll();this.updateButtons()}
     else if(this.viewMode==='single'&&!typing&&['ArrowRight','PageDown'].includes(e.key)){e.preventDefault();this.stepPage(1)}
     else if(this.viewMode==='single'&&!typing&&['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();this.stepPage(-1)}
   }
@@ -1403,12 +1780,32 @@ export class PackDocFitApp {
   stepPage(d){if(!this.pageCount())return;this.currentPage=clamp(this.currentPage+d,0,this.pageCount()-1);this.selected=new Set([this.currentPage]);this.anchorPage=this.currentPage;this.updateAll()}
 
   modal(title,body,buttons=[{label:'Close'}],onMount=null,onClose=null) {
-    const back=document.createElement('div');back.className='modal-backdrop';back.innerHTML=`<div class="modal"><div class="modal-head"><h2>${esc(title)}</h2><button class="small-button" data-close>✕</button></div><div class="modal-body">${body}</div><div class="modal-foot">${buttons.map((b,i)=>`<button class="small-button" data-modal-button="${i}" ${b.primary?'style="background:var(--accent);color:white;border-color:var(--accent)"':''}>${esc(b.label)}</button>`).join('')}</div></div>`
-    document.body.append(back);const close=()=>{onClose?.();back.remove()};$('[data-close]',back).onclick=close;back.addEventListener('pointerdown',e=>{if(e.target===back)close()});$$('[data-modal-button]',back).forEach(b=>b.onclick=async()=>{const cfg=buttons[+b.dataset.modalButton];let should=true;if(cfg.onClick)should=await cfg.onClick(back)!==false;if(should)close()});onMount?.(back);return back
+    const previousFocus=document.activeElement
+    const id=`pdf-modal-${Math.random().toString(36).slice(2,9)}`
+    const back=document.createElement('div');back.className='modal-backdrop';back.innerHTML=`<div class="modal" role="dialog" aria-modal="true" aria-labelledby="${id}"><div class="modal-head"><h2 id="${id}">${esc(title)}</h2><button class="small-button" type="button" data-close aria-label="${esc(this.t('close'))}">✕</button></div><div class="modal-body">${body}</div><div class="modal-foot">${buttons.map((b,i)=>`<button class="small-button ${b.primary?'primary':''}" type="button" data-modal-button="${i}">${esc(b.label)}</button>`).join('')}</div></div>`
+    document.body.append(back)
+    const dialog=$('.modal',back)
+    const focusables=()=>$$('button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',dialog).filter(el=>el.offsetParent!==null)
+    let closed=false
+    const close=()=>{if(closed)return;closed=true;onClose?.();back.remove();if(previousFocus?.isConnected)previousFocus.focus?.()}
+    $('[data-close]',back).onclick=close
+    back.addEventListener('pointerdown',e=>{if(e.target===back)close()})
+    back.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){e.preventDefault();close();return}
+      if(e.key!=='Tab')return
+      const list=focusables();if(!list.length){e.preventDefault();dialog.focus?.();return}
+      const first=list[0],last=list.at(-1)
+      if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}
+      else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
+    })
+    $$('[data-modal-button]',back).forEach(b=>b.onclick=async()=>{const cfg=buttons[+b.dataset.modalButton];let should=true;if(cfg.onClick)should=await cfg.onClick(back)!==false;if(should)close()})
+    onMount?.(back)
+    requestAnimationFrame(()=>{const preferred=$('input:not([type="hidden"]):not([disabled]), select:not([disabled]), button[data-modal-button].primary',dialog);(preferred||focusables()[0]||dialog).focus?.()})
+    return back
   }
 
   loadSettings() {
-    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportQuality:'normal',exportDpi:240,zoom:1,continuousZoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,thumbnailWidth:150,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true}}
+    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportQuality:'normal',exportDpi:240,zoom:1,continuousZoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,thumbnailWidth:150,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true,lineStyle:'solid',rectCornerStyle:'square',arrowStyle:'closed'}}
     try{
       const x=JSON.parse(localStorage.getItem('packdocfit-settings')||'{}')
       if(!x.exportQuality && Number.isFinite(Number(x.exportDpi))){const dpi=Number(x.exportDpi);x.exportQuality=dpi===120?'low':dpi===240?'normal':dpi===360?'high':'custom'}
@@ -1416,5 +1813,15 @@ export class PackDocFitApp {
     }catch{return defaults}
   }
   saveSettings(){localStorage.setItem('packdocfit-settings',JSON.stringify(this.settings))}
-  applyTheme(){const t=this.settings.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):this.settings.theme;document.documentElement.dataset.theme=t}
+  applyTheme(){
+    const t=this.settings.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):this.settings.theme
+    document.documentElement.dataset.theme=['light','dark','black'].includes(t)?t:'light'
+    const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.setAttribute('content',t==='black'?'#000000':t==='dark'?'#0D1117':'#F6F1E8')
+  }
+  bindSystemThemeListener(){
+    if(this.systemThemeMedia)return
+    this.systemThemeMedia=matchMedia('(prefers-color-scheme: dark)')
+    this.systemThemeListener=()=>{if(this.settings.theme==='system')this.applyTheme()}
+    if(this.systemThemeMedia.addEventListener)this.systemThemeMedia.addEventListener('change',this.systemThemeListener);else this.systemThemeMedia.addListener?.(this.systemThemeListener)
+  }
 }
