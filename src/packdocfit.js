@@ -1,4 +1,5 @@
 import * as mupdf from 'mupdf'
+import { PdfDisplayRenderer } from './pdf_renderer.js'
 import { tr } from './i18n.js'
 
 const MM_TO_PT = 72 / 25.4
@@ -77,6 +78,15 @@ function pagePointFromEvent(ev, el, pageBounds) {
 }
 function filenameStem(name='document.pdf') { return name.replace(/\.[^.]+$/, '') || 'document' }
 
+function asBytes(value) {
+  if (!value) return new Uint8Array()
+  if (value instanceof Uint8Array) return value
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (typeof value.asUint8Array === 'function') return new Uint8Array(value.asUint8Array())
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+  return new Uint8Array(value)
+}
+
 async function sha256(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2,'0')).join('')
@@ -110,8 +120,12 @@ export class PackDocFitApp {
     this.language = this.settings.language || 'ko'
     this.settings.language = this.language
     this.zoom = this.settings.zoom
+    this.columnZoom = this.settings.continuousZoom || 1
     this.viewMode = this.settings.viewMode
     this.annotStyle = this.settings.annotStyle
+    this.displayRenderer = new PdfDisplayRenderer(() => this.makePdfBytes({ decrypt: true }))
+    this.continuousObserver = null
+    this.thumbnailObserver = null
   }
 
   t(key, vars={}) { return tr(this.language, key, vars) }
@@ -187,12 +201,12 @@ export class PackDocFitApp {
         <main class="workspace" id="workspace">
           <aside class="sidebar" id="sidebar">
             <section class="source-pane">
-              <div class="panel-heading"><span>${this.t('files')}</span><span class="count" id="fileCount">0</span></div>
+              <span id="fileCount" hidden>0</span>
               <div class="source-scroll"><div class="source-list" id="sourceList"></div></div>
             </section>
             <div class="splitter splitter-horizontal" id="sourcePageSplitter" role="separator" aria-orientation="horizontal" title="${this.t('splitterReset')}"></div>
             <section class="page-pane">
-              <div class="panel-heading"><span>${this.t('pages')}</span><span class="count" id="pageCount">0</span></div>
+              <span id="pageCount" hidden>0</span>
               <div class="sidebar-scroll"><div class="page-list" id="pageList"></div></div>
             </section>
           </aside>
@@ -243,10 +257,19 @@ export class PackDocFitApp {
       e.preventDefault()
       const factor = e.deltaY < 0 ? 1.12 : 0.89
       if (this.viewMode === 'single') this.zoom = clamp(this.zoom*factor,.25,4)
-      else this.columnZoom = clamp(this.columnZoom*factor,.35,2.2)
+      else { this.columnZoom = clamp(this.columnZoom*factor,.18,1.8); this.settings.continuousZoom = this.columnZoom }
       this.settings.zoom = this.zoom
       this.saveSettings()
       this.renderStage()
+    }, { passive:false })
+
+    this.els.sidebar.addEventListener('wheel', e => {
+      if (!e.ctrlKey || !this.pageCount()) return
+      e.preventDefault()
+      const factor = e.deltaY < 0 ? 1.12 : 0.89
+      this.settings.thumbnailWidth = clamp(Math.round((this.settings.thumbnailWidth || 150) * factor), 92, 360)
+      this.saveSettings()
+      this.renderSidebar()
     }, { passive:false })
 
     const finish = () => { document.body.classList.remove('resizing-layout'); this.saveSettings() }
@@ -257,7 +280,7 @@ export class PackDocFitApp {
         this.settings.sidebarWidth=clamp(ev.clientX-r.left,180,max)
         this.applyLayoutSettings()
       }
-      const up = ev => { this.els.sidebarSplitter.removeEventListener('pointermove',move); this.els.sidebarSplitter.removeEventListener('pointerup',up); finish(); this.renderStage() }
+      const up = ev => { this.els.sidebarSplitter.removeEventListener('pointermove',move); this.els.sidebarSplitter.removeEventListener('pointerup',up); finish(); this.renderSidebar(); this.renderStage() }
       this.els.sidebarSplitter.addEventListener('pointermove',move); this.els.sidebarSplitter.addEventListener('pointerup',up)
     })
     this.els.sourcePageSplitter.addEventListener('pointerdown', e => {
@@ -270,7 +293,7 @@ export class PackDocFitApp {
       const up = () => { this.els.sourcePageSplitter.removeEventListener('pointermove',move); this.els.sourcePageSplitter.removeEventListener('pointerup',up); finish() }
       this.els.sourcePageSplitter.addEventListener('pointermove',move); this.els.sourcePageSplitter.addEventListener('pointerup',up)
     })
-    this.els.sidebarSplitter.addEventListener('dblclick',()=>{this.settings.sidebarWidth=245;this.applyLayoutSettings();this.saveSettings();this.renderStage()})
+    this.els.sidebarSplitter.addEventListener('dblclick',()=>{this.settings.sidebarWidth=245;this.applyLayoutSettings();this.saveSettings();this.renderSidebar();this.renderStage()})
     this.els.sourcePageSplitter.addEventListener('dblclick',()=>{this.settings.filesSplitPct=24;this.applyLayoutSettings();this.saveSettings()})
   }
 
@@ -332,6 +355,7 @@ export class PackDocFitApp {
   newProject(confirmFirst=true) {
     if (confirmFirst && this.isModified() && !confirm(this.t('confirmNew'))) return
     try { this.project?.destroy?.() } catch {}
+    this.displayRenderer?.invalidate()
     this.project = new mupdf.PDFDocument()
     this.project.enableJournal()
     this.pageMeta = []
@@ -435,7 +459,7 @@ export class PackDocFitApp {
 
   withOperation(label, fn) {
     this.project.beginOperation(label)
-    try { const out=fn(); this.project.endOperation(); this.dirty=true; return out }
+    try { const out=fn(); this.project.endOperation(); this.dirty=true; this.displayRenderer?.invalidate(); return out }
     catch (e) { try { this.project.abandonOperation() } catch {}; throw e }
   }
 
@@ -503,7 +527,7 @@ export class PackDocFitApp {
       ? JSON.stringify({ garbage:'deduplicate', compress:true, appearance:'yes', encrypt:'aes-256', 'user-password':this.outputPassword, 'owner-password':this.outputPassword })
       : JSON.stringify({ garbage:'deduplicate', compress:true, appearance:'yes', encrypt:'none' })
     const b=this.project.saveToBuffer(opts)
-    try { return new Uint8Array(b.asUint8Array()) } finally { try { b.destroy?.() } catch {} }
+    try { return asBytes(b).slice() } finally { try { b.destroy?.() } catch {} }
   }
 
   markSaved() { this.dirty=false; this.pageMeta.forEach(x=>x.modified=false); this.updateAll(false) }
@@ -514,7 +538,7 @@ export class PackDocFitApp {
     try {
       indices.forEach(i=>out.graftPage(-1,this.project,i))
       const b=out.saveToBuffer('garbage=deduplicate,compress=yes,appearance=yes')
-      const bytes=new Uint8Array(b.asUint8Array()); b.destroy?.()
+      const bytes=asBytes(b).slice(); b.destroy?.()
       downloadBytes(bytes,`PackDocFit_extract_${indices.map(i=>i+1).join('-')}.pdf`,'application/pdf')
       this.setStatus(`Extracted ${indices.length} page${indices.length>1?'s':''}.`)
     } finally { out.destroy?.() }
@@ -526,7 +550,7 @@ export class PackDocFitApp {
     try {
       indices.forEach(i=>out.graftPage(-1,this.project,i))
       const b=out.saveToBuffer('garbage=deduplicate,compress=yes,appearance=yes')
-      this.clipboardBytes=new Uint8Array(b.asUint8Array()); b.destroy?.()
+      this.clipboardBytes=asBytes(b).slice(); b.destroy?.()
     } finally { out.destroy?.() }
     if (cut) this.deleteSelectedPages()
     else this.setStatus(`Copied ${indices.length} page${indices.length>1?'s':''}.`)
@@ -646,7 +670,7 @@ export class PackDocFitApp {
 
   undo() {
     if(!this.project.canUndo())return
-    this.project.undo(); this.selectedAnnot=null; this.dirty=true
+    this.project.undo(); this.displayRenderer?.invalidate(); this.selectedAnnot=null; this.dirty=true
     this.pageMeta = Array.from({length:this.pageCount()},(_,i)=>this.pageMeta[i]||{source:'Undo restored',sourcePage:i+1,modified:true})
     this.pageMeta.forEach(m=>m.modified=true)
     this.currentPage=clamp(this.currentPage,0,Math.max(0,this.pageCount()-1)); this.selected=new Set(this.pageCount()?[this.currentPage]:[])
@@ -654,7 +678,7 @@ export class PackDocFitApp {
   }
   redo() {
     if(!this.project.canRedo())return
-    this.project.redo(); this.selectedAnnot=null; this.dirty=true
+    this.project.redo(); this.displayRenderer?.invalidate(); this.selectedAnnot=null; this.dirty=true
     this.pageMeta = Array.from({length:this.pageCount()},(_,i)=>this.pageMeta[i]||{source:'Redo restored',sourcePage:i+1,modified:true})
     this.pageMeta.forEach(m=>m.modified=true)
     this.currentPage=clamp(this.currentPage,0,Math.max(0,this.pageCount()-1)); this.selected=new Set(this.pageCount()?[this.currentPage]:[])
@@ -680,8 +704,20 @@ export class PackDocFitApp {
       this.anchorPage=index
     } else { this.selected=new Set([index]); this.anchorPage=index }
     this.currentPage=index; this.selectedAnnot=null
-    this.renderSidebar(); this.renderInspector(); this.updateButtons(); this.updateStatusbar()
+    this.syncSidebarSelection(); this.renderSourceList(); this.renderInspector(); this.updateButtons(); this.updateStatusbar(); this.syncStageSelection()
     if(this.viewMode==='single') this.renderStage()
+    else if(ev?.currentTarget?.classList?.contains('page-item')) $(`.page-card[data-page="${index}"]`,this.els.stageScroll)?.scrollIntoView({block:'center',behavior:'smooth'})
+    else if(ev?.currentTarget?.classList?.contains('page-card')) $(`.page-item[data-page="${index}"]`,this.els.pageList)?.scrollIntoView({block:'nearest',behavior:'smooth'})
+  }
+
+  syncSidebarSelection(){
+    $$('.page-item',this.els.pageList).forEach(item=>{const i=Number(item.dataset.page);item.classList.toggle('selected',this.selected.has(i));item.classList.toggle('current',i===this.currentPage)})
+  }
+
+  syncStageSelection(){
+    $$('.page-card',this.els.stageScroll).forEach(card=>{
+      const i=Number(card.dataset.page);card.classList.toggle('selected',this.selected.has(i));card.classList.toggle('current',i===this.currentPage)
+    })
   }
 
   async updateAll(full=false) {
@@ -690,7 +726,6 @@ export class PackDocFitApp {
     this.renderInspector()
     this.updateButtons()
     this.updateStatusbar()
-    if(full) this.renderSidebar()
   }
 
   updateButtons() {
@@ -726,7 +761,10 @@ export class PackDocFitApp {
     const groups=this.sourceGroups(); if(this.els.fileCount)this.els.fileCount.textContent=groups.length
     if(!this.els.sourceList)return
     if(!groups.length){this.els.sourceList.innerHTML=`<div class="source-empty">${this.t('addFilesStart')}</div>`;return}
-    this.els.sourceList.innerHTML=groups.map(g=>`<div class="source-item" data-source-id="${esc(g.id)}" draggable="true" title="${esc(g.name)}"><div class="source-icon">PDF</div><div class="source-info"><strong>${esc(g.name)}</strong><span>${g.pages.length}p</span></div><button class="source-remove" title="${esc(this.t('removeFile'))}" aria-label="${esc(this.t('removeFile'))}">×</button></div>`).join('')
+    this.els.sourceList.innerHTML=groups.map(g=>`<div class="source-item ${g.pages.includes(this.currentPage)?'selected':''}" data-source-id="${esc(g.id)}" draggable="true" title="${esc(g.name)}">
+      <div class="source-info"><strong>${esc(g.name)}</strong><span> · ${g.pages.length}p</span></div>
+      <button class="source-remove" title="${esc(this.t('removeFile'))}" aria-label="${esc(this.t('removeFile'))}">×</button>
+    </div>`).join('')
     $$('.source-item',this.els.sourceList).forEach(el=>{
       const id=el.dataset.sourceId
       el.addEventListener('click',e=>{if(e.target.closest('.source-remove'))return;const g=this.sourceGroups().find(x=>x.id===id);if(g?.pages.length){this.currentPage=g.pages[0];this.selected=new Set(g.pages);this.anchorPage=g.pages[0];this.updateAll()}})
@@ -763,19 +801,22 @@ export class PackDocFitApp {
 
   renderSidebar() {
     const token=++this.thumbToken, n=this.pageCount(); this.els.pageCount.textContent=n
+    this.thumbnailObserver?.disconnect?.();this.thumbnailObserver=null
     this.renderSourceList()
     if(!n){ this.els.pageList.innerHTML=''; return }
     this.els.pageList.innerHTML=Array.from({length:n},(_,i)=>{
       const m=this.pageMeta[i]||{source:'Document',sourcePage:i+1,modified:false}
-      return `<div class="page-item ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}" data-page="${i}" draggable="true">
-        <div class="thumb-wrap"><span>${i+1}</span></div>
-        <div class="page-meta"><div class="page-num">${this.t('pageLabel')} ${i+1}${m.modified?`<span class="modified-dot" title="${esc(this.t('modified'))}"></span>`:''}</div><div class="page-source">${esc(m.source)}</div><div class="page-size" data-size="${i}"></div></div>
+      const stem=filenameStem(m.source||'Document')
+      return `<div class="page-item ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}" data-page="${i}" draggable="true" title="${esc(m.source||'')}">
+        <div class="thumb-wrap"><canvas aria-label="${esc(this.t('pageLabel'))} ${i+1}"></canvas><span class="thumb-loading">${i+1}</span></div>
+        <div class="page-caption">${esc(stem)} · p${m.sourcePage||i+1}${m.modified?`<span class="modified-dot" title="${esc(this.t('modified'))}"></span>`:''}</div>
       </div>`
     }).join('')
 
     $$('.page-item',this.els.pageList).forEach(el=>{
       const i=+el.dataset.page
       el.addEventListener('click',e=>this.selectPage(i,e))
+      el.addEventListener('dblclick',e=>{e.preventDefault();this.currentPage=i;this.selected=new Set([i]);this.anchorPage=i;this.setViewMode('single')})
       el.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/page-index',String(i)); e.dataTransfer.effectAllowed='move' })
       el.addEventListener('dragover',e=>{e.preventDefault();el.classList.add('drag-over')})
       el.addEventListener('dragleave',()=>el.classList.remove('drag-over'))
@@ -784,24 +825,71 @@ export class PackDocFitApp {
     this.renderThumbnails(token)
   }
 
-  async renderThumbnails(token) {
-    for(let i=0;i<this.pageCount();i++){
-      if(token!==this.thumbToken)return
-      const el=$(`.page-item[data-page="${i}"] .thumb-wrap`,this.els.pageList); if(!el)continue
-      let page,pix
-      try{
-        page=this.project.loadPage(i); const b=page.getBounds(); const w=b[2]-b[0],h=b[3]-b[1]; const scale=Math.min(42/w,50/h)
-        pix=page.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true)
-        const buf=pix.asPNG(), bytes=new Uint8Array(buf.asUint8Array()); buf.destroy?.()
-        const url=URL.createObjectURL(new Blob([bytes],{type:'image/png'})); el.innerHTML=`<img src="${url}" alt="${esc(this.t('pageLabel'))} ${i+1}">`; el.querySelector('img').onload=()=>URL.revokeObjectURL(url)
-        const mmW=w/MM_TO_PT, mmH=h/MM_TO_PT; $(`[data-size="${i}"]`,this.els.pageList).textContent=`${mmW.toFixed(0)} × ${mmH.toFixed(0)} mm`
-      }catch(e){console.warn('thumbnail',e)}finally{try{pix?.destroy?.()}catch{};try{page?.destroy?.()}catch{}}
-      if(i%5===4) await new Promise(r=>requestAnimationFrame(r))
+  async renderDisplayCanvas(index, canvas, options={}) {
+    try {
+      return await this.displayRenderer.renderToCanvas(index, canvas, options)
+    } catch (pdfjsError) {
+      console.warn('PDF.js render failed; falling back to MuPDF.js', pdfjsError)
+      return this.renderMupdfFallbackToCanvas(index, canvas, options)
     }
+  }
+
+  async renderMupdfFallbackToCanvas(index, canvas, {cssWidth=null,cssScale=null,maxDpr=2}={}) {
+    let page,pix,png
+    try {
+      page=this.project.loadPage(index)
+      const b=page.getBounds(), pw=b[2]-b[0], ph=b[3]-b[1]
+      const scale=cssScale ?? (cssWidth ? cssWidth/Math.max(pw,1) : 1)
+      const dpr=Math.max(1,Math.min(maxDpr,window.devicePixelRatio||1))
+      pix=page.toPixmap(mupdf.Matrix.scale(scale*dpr,scale*dpr),mupdf.ColorSpace.DeviceRGB,false,true)
+      png=pix.asPNG()
+      const blob=new Blob([asBytes(png)],{type:'image/png'})
+      const bitmap=await createImageBitmap(blob)
+      canvas.width=bitmap.width;canvas.height=bitmap.height
+      canvas.style.width=`${Math.max(1,Math.round(pw*scale))}px`;canvas.style.height=`${Math.max(1,Math.round(ph*scale))}px`
+      const ctx=canvas.getContext('2d',{alpha:false});ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(bitmap,0,0);bitmap.close?.()
+      return {width:pw,height:ph,cssWidth:pw*scale,cssHeight:ph*scale,scale}
+    } finally { try{png?.destroy?.()}catch{};try{pix?.destroy?.()}catch{};try{page?.destroy?.()}catch{} }
+  }
+
+  async renderThumbnailCanvas(index,item,target,token) {
+    if(token!==this.thumbToken||!item)return
+    const canvas=$('canvas',item),loading=$('.thumb-loading',item);if(!canvas||canvas.dataset.renderState==='loading'||canvas.dataset.renderState==='done')return
+    canvas.dataset.renderState='loading'
+    try{
+      const info=await this.renderDisplayCanvas(index,canvas,{cssWidth:target,maxDpr:1.5})
+      if(token!==this.thumbToken)return
+      canvas.dataset.renderState='done';loading?.remove();item.classList.add('rendered')
+      const mmW=info.width/MM_TO_PT,mmH=info.height/MM_TO_PT
+      item.title=`${this.pageMeta[index]?.source||''} · p${this.pageMeta[index]?.sourcePage||index+1} · ${mmW.toFixed(0)} × ${mmH.toFixed(0)} mm`
+    }catch(e){
+      console.warn('thumbnail',e);canvas.dataset.renderState='error'
+      if(loading){loading.textContent=this.t('previewUnavailable');loading.classList.add('error')}
+    }
+  }
+
+  renderThumbnails(token) {
+    const target=Math.min(Number(this.settings.thumbnailWidth)||150,Math.max(92,this.els.sidebar.clientWidth-28))
+    const items=$$('.page-item',this.els.pageList)
+    if(!('IntersectionObserver' in window)){
+      items.forEach(item=>this.renderThumbnailCanvas(Number(item.dataset.page),item,target,token))
+      return
+    }
+    this.thumbnailObserver=new IntersectionObserver(entries=>{
+      for(const entry of entries)if(entry.isIntersecting){
+        const item=entry.target,index=Number(item.dataset.page)
+        this.renderThumbnailCanvas(index,item,target,token)
+        this.thumbnailObserver?.unobserve(item)
+      }
+    },{root:this.els.pageList.parentElement,rootMargin:'900px 0px',threshold:0.01})
+    items.forEach(item=>this.thumbnailObserver.observe(item))
+    const current=$(`.page-item[data-page="${this.currentPage}"]`,this.els.pageList)
+    if(current)this.renderThumbnailCanvas(this.currentPage,current,target,token)
   }
 
   async renderStage() {
     const token=++this.renderToken
+    this.continuousObserver?.disconnect?.();this.continuousObserver=null
     const n=this.pageCount()
     if(!n){
       this.els.stageScroll.innerHTML=`<div class="empty-state"><div class="empty-card"><strong>${this.t('dropTitle')}</strong>${this.t('dropBody')}<div class="drop-note">${this.t('dropNote')}</div></div></div>`
@@ -811,51 +899,90 @@ export class PackDocFitApp {
     else await this.renderContinuous(token)
   }
 
+  continuousLayoutMetrics() {
+    const available=Math.max(260,this.els.stage.clientWidth-52)
+    const zoom=clamp(this.columnZoom||1,.18,1.8)
+    const spacing=16
+    const preferredCols=clamp(Math.round(1/Math.max(zoom,.01)),1,8)
+    const maxColsBySpace=clamp(Math.floor((available+spacing)/(128+spacing)),1,8)
+    const cols=Math.min(preferredCols,maxColsBySpace)
+    const desired=Math.max(112,Math.min(940,available*zoom))
+    const maxForCols=Math.max(112,(available-spacing*(cols-1))/cols)
+    const width=Math.floor(Math.min(desired,maxForCols))
+    return {available,cols,width,spacing}
+  }
+
   async renderContinuous(token) {
-    const base=0.72*this.columnZoom
-    const available=Math.max(300,this.els.stage.clientWidth-60)
-    let typical=560*base, cols=clamp(Math.floor((available+18)/(typical+18)),1,6)
+    const {cols,width}=this.continuousLayoutMetrics()
     this.els.stageScroll.innerHTML=`<div class="continuous-view" style="--cols:${cols}" id="continuous"></div>`
     const wrap=$('#continuous',this.els.stageScroll)
+    try { await this.displayRenderer.getDocument() } catch(e) { console.warn('display snapshot',e) }
     for(let i=0;i<this.pageCount();i++){
       if(token!==this.renderToken)return
-      let page,pix
-      try{
-        page=this.project.loadPage(i); const b=page.getBounds(); const w=b[2]-b[0]
-        const scale=Math.min(base,Math.max(.22,(available/cols-28)/w))
-        pix=page.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true)
-        const buf=pix.asPNG(), bytes=new Uint8Array(buf.asUint8Array()); buf.destroy?.(); const url=URL.createObjectURL(new Blob([bytes],{type:'image/png'}))
-        const card=document.createElement('div'); card.className=`page-card ${this.selected.has(i)?'selected':''}`; card.dataset.page=i
-        card.innerHTML=`<img src="${url}" draggable="false" alt="${esc(this.t('pageLabel'))} ${i+1}"><div class="page-card-caption">${i+1} · ${esc(this.pageMeta[i]?.source||'')}</div>`
-        card.querySelector('img').onload=()=>URL.revokeObjectURL(url)
-        card.addEventListener('click',e=>this.selectPage(i,e)); wrap.append(card)
-      }catch(e){console.warn('render page',i,e)}finally{try{pix?.destroy?.()}catch{};try{page?.destroy?.()}catch{}}
-      if(i%3===2) await new Promise(r=>requestAnimationFrame(r))
+      let ratio=1.414
+      try{const info=await this.displayRenderer.pageInfo(i);ratio=info.height/Math.max(info.width,1)}catch{try{const p=this.project.loadPage(i);const b=p.getBounds();ratio=(b[3]-b[1])/Math.max(1,b[2]-b[0]);p.destroy?.()}catch{}}
+      const h=Math.max(80,Math.round(width*ratio))
+      const m=this.pageMeta[i]||{}
+      const card=document.createElement('div');card.className=`page-card ${this.selected.has(i)?'selected':''} ${i===this.currentPage?'current':''}`;card.dataset.page=i;card.draggable=true
+      card.innerHTML=`<div class="page-paper" style="width:${width}px;height:${h}px"><canvas data-render-state="idle"></canvas><div class="page-skeleton">${esc(this.t('previewLoading'))}</div></div><div class="page-card-caption">${i+1} · ${esc(filenameStem(m.source||'Document'))}-${m.sourcePage||i+1}</div>`
+      card.addEventListener('click',e=>this.selectPage(i,e))
+      card.addEventListener('dblclick',e=>{e.preventDefault();this.currentPage=i;this.selected=new Set([i]);this.anchorPage=i;this.setViewMode('single')})
+      card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/page-index',String(i));e.dataTransfer.effectAllowed='move'})
+      card.addEventListener('dragover',e=>{e.preventDefault();card.classList.add('drag-over')})
+      card.addEventListener('dragleave',()=>card.classList.remove('drag-over'))
+      card.addEventListener('drop',e=>{e.preventDefault();card.classList.remove('drag-over');const from=Number(e.dataTransfer.getData('text/page-index'));if(Number.isInteger(from))this.reorderPage(from,i)})
+      wrap.append(card)
     }
+
+    this.continuousObserver=new IntersectionObserver(entries=>{
+      for(const entry of entries)if(entry.isIntersecting){
+        const card=entry.target,index=Number(card.dataset.page),canvas=$('canvas',card),skeleton=$('.page-skeleton',card)
+        this.renderContinuousCanvas(index,canvas,skeleton,width,token)
+        this.continuousObserver?.unobserve(card)
+      }
+    },{root:this.els.stageScroll,rootMargin:'1200px 0px',threshold:0.01})
+    $$('.page-card',wrap).forEach(card=>this.continuousObserver.observe(card))
+    const current=$(`.page-card[data-page="${this.currentPage}"]`,wrap)
+    if(current){const canvas=$('canvas',current),skeleton=$('.page-skeleton',current);this.renderContinuousCanvas(this.currentPage,canvas,skeleton,width,token)}
+  }
+
+  async renderContinuousCanvas(index,canvas,skeleton,width,token){
+    if(!canvas||canvas.dataset.renderState==='loading'||canvas.dataset.renderState==='done')return
+    canvas.dataset.renderState='loading'
+    try{
+      await this.renderDisplayCanvas(index,canvas,{cssWidth:width,maxDpr:1.75})
+      if(token!==this.renderToken)return
+      canvas.dataset.renderState='done';skeleton?.remove()
+    }catch(e){console.warn('render page',index,e);canvas.dataset.renderState='error';if(skeleton){skeleton.textContent=this.t('previewUnavailable');skeleton.classList.add('error')}}
   }
 
   async renderSingle(token) {
     this.currentPage=clamp(this.currentPage,0,this.pageCount()-1)
-    let page,pix
+    let page
     try{
-      page=this.project.loadPage(this.currentPage); const bounds=page.getBounds(); const pw=bounds[2]-bounds[0], ph=bounds[3]-bounds[1]
-      const availW=Math.max(220,this.els.stage.clientWidth-90), availH=Math.max(220,this.els.stage.clientHeight-80)
-      const fit=Math.min(availW/pw,availH/ph); const scale=clamp(fit*this.zoom,.2,4)
-      pix=page.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true)
-      const png=pix.asPNG(), bytes=new Uint8Array(png.asUint8Array()); png.destroy?.(); const url=URL.createObjectURL(new Blob([bytes],{type:'image/png'}))
-      if(token!==this.renderToken){URL.revokeObjectURL(url);return}
-      const width=Math.round(pw*scale),height=Math.round(ph*scale)
-      this.els.stageScroll.innerHTML=`<div class="single-wrap"><div class="single-page" id="singlePage" style="width:${width}px;height:${height}px">
-        <img id="singleImage" src="${url}" draggable="false" alt="Page ${this.currentPage+1}">
+      let bounds,pw,ph
+      try{const info=await this.displayRenderer.pageInfo(this.currentPage);pw=info.width;ph=info.height}catch{page=this.project.loadPage(this.currentPage);bounds=page.getBounds();pw=bounds[2]-bounds[0];ph=bounds[3]-bounds[1]}
+      const availW=Math.max(220,this.els.stage.clientWidth-84),availH=Math.max(220,this.els.stage.clientHeight-100)
+      const fit=Math.min(availW/pw,availH/ph),scale=clamp(fit*this.zoom,.2,4),width=Math.round(pw*scale),height=Math.round(ph*scale)
+      const m=this.pageMeta[this.currentPage]||{}
+      this.els.stageScroll.innerHTML=`<div class="single-wrap"><div class="single-page-shell"><div class="single-page" id="singlePage" style="width:${width}px;height:${height}px">
+        <canvas id="singleCanvas" style="width:${width}px;height:${height}px"></canvas>
+        <div class="page-skeleton" id="singleLoading">${esc(this.t('previewLoading'))}</div>
         <div class="text-layer ${this.tool==='select'?'enabled':''}" id="textLayer"></div>
         <div class="annotation-layer" id="annotationLayer"></div>
         <div class="interaction-layer" id="interactionLayer"></div>
-      </div></div>`
-      $('#singleImage',this.els.stageScroll).onload=()=>URL.revokeObjectURL(url)
-      await this.renderTextLayer(page,bounds,scale)
-      this.renderAnnotationLayer(page,bounds,scale)
-      this.bindSingleInteraction(page,bounds,scale)
-    } finally { try{pix?.destroy?.()}catch{}; try{page?.destroy?.()}catch{} }
+      </div><div class="single-caption">${this.currentPage+1} · ${esc(filenameStem(m.source||'Document'))}-${m.sourcePage||this.currentPage+1}</div></div></div>`
+      const canvas=$('#singleCanvas',this.els.stageScroll)
+      await this.renderDisplayCanvas(this.currentPage,canvas,{cssScale:scale,maxDpr:2})
+      if(token!==this.renderToken)return
+      $('#singleLoading',this.els.stageScroll)?.remove()
+      if(!page){page=this.project.loadPage(this.currentPage);bounds=page.getBounds()}
+      const mupdfScale=width/Math.max(bounds[2]-bounds[0],1)
+      await this.renderTextLayer(page,bounds,mupdfScale)
+      this.renderAnnotationLayer(page,bounds,mupdfScale)
+      this.bindSingleInteraction(page,bounds,mupdfScale)
+    } catch(e){console.warn('single render',e);this.els.stageScroll.innerHTML=`<div class="preview-error"><strong>${esc(this.t('previewUnavailable'))}</strong><span>${esc(e?.message||String(e))}</span></div>`}
+    finally { try{page?.destroy?.()}catch{} }
   }
 
   async renderTextLayer(page,bounds,scale) {
@@ -1051,7 +1178,7 @@ export class PackDocFitApp {
     const indices=this.targets();if(!indices.length)return
     for(const i of indices){
       let page,pix,b
-      try{page=this.project.loadPage(i);const scale=(this.settings.exportDpi||240)/72;pix=page.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true);b=fmt==='jpg'?pix.asJPEG?.(92):pix.asPNG();if(!b)throw new Error(this.t('noJpeg'));downloadBytes(new Uint8Array(b.asUint8Array()),`page_${i+1}.${fmt}`,fmt==='jpg'?'image/jpeg':'image/png')}
+      try{page=this.project.loadPage(i);const scale=(this.settings.exportDpi||240)/72;pix=page.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true);b=fmt==='jpg'?pix.asJPEG?.(92):pix.asPNG();if(!b)throw new Error(this.t('noJpeg'));downloadBytes(asBytes(b).slice(),`page_${i+1}.${fmt}`,fmt==='jpg'?'image/jpeg':'image/png')}
       finally{try{b?.destroy?.()}catch{};try{pix?.destroy?.()}catch{};try{page?.destroy?.()}catch{}}
       await new Promise(r=>setTimeout(r,20))
     }
@@ -1116,7 +1243,15 @@ export class PackDocFitApp {
   }
 
   async renderPageBlob(index,scale=1) {
-    let p,pix,b;try{p=this.project.loadPage(index);pix=p.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true);b=pix.asPNG();const bytes=new Uint8Array(b.asUint8Array());return{url:URL.createObjectURL(new Blob([bytes],{type:'image/png'})),bytes}}finally{b?.destroy?.();pix?.destroy?.();p?.destroy?.()}
+    try{
+      const blob=await this.displayRenderer.renderToBlob(index,{cssScale:scale,type:'image/png'})
+      const bytes=new Uint8Array(await blob.arrayBuffer())
+      return{url:URL.createObjectURL(blob),bytes}
+    }catch(error){
+      console.warn('PDF.js compare render failed; using MuPDF.js fallback',error)
+      let p,pix,b
+      try{p=this.project.loadPage(index);pix=p.toPixmap(mupdf.Matrix.scale(scale,scale),mupdf.ColorSpace.DeviceRGB,false,true);b=pix.asPNG();const bytes=asBytes(b).slice();return{url:URL.createObjectURL(new Blob([bytes],{type:'image/png'})),bytes}}finally{b?.destroy?.();pix?.destroy?.();p?.destroy?.()}
+    }
   }
 
   openSettings() {
@@ -1174,7 +1309,7 @@ export class PackDocFitApp {
   }
 
   openAbout() {
-    const version='0.1.4'
+    const version='0.1.5'
     this.modal(this.t('about'),`<div class="about-panel">
       <img class="about-app-icon" src="./assets/app_icon.png" alt="PackDocFit">
       <h2>PackDocFit</h2>
@@ -1227,8 +1362,20 @@ export class PackDocFitApp {
     const close=e=>{if(!pop.contains(e.target)&&e.target!==anchor){pop.remove();document.removeEventListener('pointerdown',close,true)}};setTimeout(()=>document.addEventListener('pointerdown',close,true),0)
   }
 
+  zoomStage(factor) {
+    if(this.viewMode==='single') {
+      this.zoom=clamp(this.zoom*factor,.25,4)
+      this.settings.zoom=this.zoom
+    } else {
+      this.columnZoom=clamp(this.columnZoom*factor,.18,1.8)
+      this.settings.continuousZoom=this.columnZoom
+    }
+    this.saveSettings()
+    this.renderStage()
+  }
+
   async menuAction(a) {
-    const map={new:()=>this.newProject(true),open:()=>this.els.fileInput.click(),save:()=>this.save(false),saveAs:()=>this.save(true),extract:()=>this.extractSelected(),exportPng:()=>this.exportSelectedImage('png'),exportJpg:()=>this.exportSelectedImage('jpg'),undo:()=>this.undo(),redo:()=>this.redo(),copy:()=>this.copyPages(false),cut:()=>this.copyPages(true),paste:()=>this.pastePages(),selectAll:()=>{this.selected=new Set(Array.from({length:this.pageCount()},(_,i)=>i));this.updateAll()},delete:()=>this.deleteSelectedPages(),rotateR:()=>this.rotateSelected(90),rotateL:()=>this.rotateSelected(-90),rotate180:()=>this.rotateSelected(180),fit:()=>this.openFitDialog(),continuous:()=>this.setViewMode('continuous'),single:()=>this.setViewMode('single'),zoomIn:()=>{this.zoom=clamp(this.zoom*1.15,.25,4);this.renderStage()},zoomOut:()=>{this.zoom=clamp(this.zoom*.87,.25,4);this.renderStage()},compareH:()=>this.openCompare('horizontal'),compareV:()=>this.openCompare('vertical'),compareO:()=>this.openCompare('overlay'),settings:()=>this.openSettings(),help:()=>this.openHelp(),about:()=>this.openAbout(),annotationProps:()=>this.openAnnotationProperties()};await map[a]?.()
+    const map={new:()=>this.newProject(true),open:()=>this.els.fileInput.click(),save:()=>this.save(false),saveAs:()=>this.save(true),extract:()=>this.extractSelected(),exportPng:()=>this.exportSelectedImage('png'),exportJpg:()=>this.exportSelectedImage('jpg'),undo:()=>this.undo(),redo:()=>this.redo(),copy:()=>this.copyPages(false),cut:()=>this.copyPages(true),paste:()=>this.pastePages(),selectAll:()=>{this.selected=new Set(Array.from({length:this.pageCount()},(_,i)=>i));this.updateAll()},delete:()=>this.deleteSelectedPages(),rotateR:()=>this.rotateSelected(90),rotateL:()=>this.rotateSelected(-90),rotate180:()=>this.rotateSelected(180),fit:()=>this.openFitDialog(),continuous:()=>this.setViewMode('continuous'),single:()=>this.setViewMode('single'),zoomIn:()=>this.zoomStage(1.15),zoomOut:()=>this.zoomStage(.87),compareH:()=>this.openCompare('horizontal'),compareV:()=>this.openCompare('vertical'),compareO:()=>this.openCompare('overlay'),settings:()=>this.openSettings(),help:()=>this.openHelp(),about:()=>this.openAbout(),annotationProps:()=>this.openAnnotationProperties()};await map[a]?.()
   }
 
   onKeyDown(e) {
@@ -1261,7 +1408,7 @@ export class PackDocFitApp {
   }
 
   loadSettings() {
-    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportQuality:'normal',exportDpi:240,zoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true}}
+    const defaults={language:'ko',theme:'system',imageOrientation:'auto',exportQuality:'normal',exportDpi:240,zoom:1,continuousZoom:1,viewMode:'continuous',compareMode:'horizontal',sidebarWidth:245,filesSplitPct:24,thumbnailWidth:150,annotStyle:{color:'#ffcc33',opacity:.45,width:2,fontSize:14,highlightTextOnly:true}}
     try{
       const x=JSON.parse(localStorage.getItem('packdocfit-settings')||'{}')
       if(!x.exportQuality && Number.isFinite(Number(x.exportDpi))){const dpi=Number(x.exportDpi);x.exportQuality=dpi===120?'low':dpi===240?'normal':dpi===360?'high':'custom'}

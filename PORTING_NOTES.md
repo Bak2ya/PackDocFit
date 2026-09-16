@@ -1,5 +1,18 @@
 # PackDocFit porting notes
 
+## v0.1.5
+
+- Rebuilt the document display path around a split-engine architecture: **MuPDF.js = editing**, **PDF.js = display**. PDF.js now renders the left thumbnails, continuous preview, single-page preview, and comparison images. MuPDF.js remains the source of truth for page operations, annotations, text coordinates, security, undo/redo and saving.
+- Added a MuPDF.js rendering fallback so a PDF.js display failure produces a recoverable preview path instead of a blank work area.
+- Fixed the initial web renderer's PNG conversion assumption so current MuPDF.js byte-return values are handled correctly.
+- Changed the left sidebar to match the Windows Build 29 information hierarchy: compact file rows above, large visual page thumbnails below. Removed the permanent Files / Pages heading rows.
+- Changed continuous view to start as a centered one-column document surface at normal zoom. Ctrl+wheel zooming can naturally flow into multiple columns, following the Windows adaptive viewing model.
+- Added lazy near-viewport rendering for both the central continuous view and the page-thumbnail sidebar, with visible loading placeholders and explicit preview-error states.
+- Added Ctrl+wheel thumbnail sizing in the page sidebar, made View → Zoom follow the active continuous/single view, and preserved the draggable Files/Pages and sidebar/preview splitters.
+- Added direct page drag reorder in the continuous preview and double-click entry into single-page view.
+- Added bundled PDF.js worker plus packaged CMaps / standard fonts / ICC / WASM support during the Vite build for better real-world and CJK rendering compatibility.
+- GitHub Actions/Vite build is now the supported Pages deployment path because the display renderer is bundled from `pdfjs-dist`; direct unbuilt branch serving is no longer treated as a supported fallback.
+
 ## v0.1.4
 
 - Replaced raw DPI-first image export settings with result-first quality presets: Low (120 DPI), Normal (240 DPI), High quality (360 DPI), and Custom (72–600 DPI). The actual DPI is always visible next to the preset.
@@ -50,7 +63,8 @@ The Windows application is not wrapped or executed inside the browser. PackDocFi
 - PyMuPDF PDF editing → MuPDF.js / WebAssembly
 - Native file dialogs → browser File APIs
 - JSON settings file → localStorage + settings import/export
-- Native rendering pipeline → browser-side MuPDF rendering in the initial web port
+- Windows PDFium display role → PDF.js display rendering
+- MuPDF.js remains the browser-side editing and save engine
 
 ## Implemented in the initial port
 
@@ -78,6 +92,6 @@ The browser cannot expose arbitrary absolute local file paths, so duplicate dete
 
 Direct overwrite/save behavior depends on browser File System Access support. A download fallback is included.
 
-The Windows build used a split MuPDF-editing / PDFium-rendering architecture for specific CID-font rendering compatibility. The initial web port renders through MuPDF.js. If a known CID-font sample reproduces the Windows rendering issue in-browser, the web renderer should be split to PDF.js while keeping MuPDF.js as the editing engine.
+The Windows build intentionally separates MuPDF editing from PDFium display rendering. PackDocFit v0.1.5 now follows the same architectural principle on the web: MuPDF.js edits and saves the PDF, while PDF.js renders thumbnails and previews. Real-world CID/CJK samples still need regression testing, but display is no longer tied to the editing engine.
 
 Form widgets, links, unusually structured PDFs, very large files and all password/security permutations should be regression-tested with real-world samples before declaring one-to-one desktop parity.

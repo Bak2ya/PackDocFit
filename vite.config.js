@@ -7,7 +7,7 @@ export default defineConfig({
     assetsInlineLimit: 0,
     rollupOptions: {
       // Keep MuPDF.js external. index.html pins the browser module through an
-      // import map, which also makes direct GitHub Pages branch deployment work.
+      // import map. GitHub Actions/Vite is the supported Pages deployment path.
       external: ['mupdf'],
     },
   },

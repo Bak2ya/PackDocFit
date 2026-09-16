@@ -9,16 +9,15 @@
   <title>PackDocFit — PDF editor on the web</title>
 
   <!--
-    Keep the stylesheet in HTML instead of importing CSS from JavaScript.
-    This lets the source tree itself remain usable on GitHub Pages as a
-    fallback even when Pages is configured to deploy directly from a branch.
+    Keep the stylesheet in HTML so the app shell and boot diagnostics are styled
+    before the JavaScript application starts.
   -->
   <link rel="stylesheet" href="./src/style.css" />
 
   <!--
-    MuPDF.js is pinned to an exact open-source release. Vite externalizes the
-    module for production, and this import map also lets the unbuilt source run
-    directly on GitHub Pages. PDF files are still processed only in-browser.
+    MuPDF.js is pinned to an exact open-source release and externalized from the
+    Vite bundle. PDF.js is bundled by Vite for display rendering. GitHub Actions
+    is the supported Pages deployment path. PDF files are processed in-browser.
   -->
   <script type="importmap">
   {

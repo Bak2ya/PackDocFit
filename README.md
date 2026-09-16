@@ -21,7 +21,7 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 - PDF 병합, 페이지 추출, 삭제, 복사, 잘라내기, 붙여넣기
 - 페이지 회전 및 크기 조절
 - 기준 폭 맞추기 및 표준 용지 크기 맞추기
-- 연속 보기, 다열 보기, 한 페이지 보기
+- Windows 버전과 같은 작업 흐름의 연속 보기, 축소 시 다열 보기, 한 페이지 보기
 - PDF 텍스트 레이어 선택 및 복사 (OCR 아님)
 - 형광펜, 사각형, 직선, 화살표, 자유형 펜, 텍스트 주석
 - 주석 이동, 크기 변경, 속성 변경 및 삭제
@@ -34,6 +34,7 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 - 한국어 / 영어 / 일본어 / 스페인어 UI
 - 라이트 / 다크 / 시스템 테마
 - 파일 영역 ↔ 페이지 영역, 왼쪽 패널 ↔ 미리보기 영역 크기 드래그 조절
+- 실제 페이지 썸네일 중심의 왼쪽 페이지 목록과 중앙 PDF 미리보기
 - 설정 가져오기 / 내보내기
 - 정보창에서 개발자 문의, GitHub, Windows 다운로드, 간단 사용법 확인
 
@@ -43,7 +44,7 @@ PDF와 이미지 파일은 PackDocFit 서버로 업로드되지 않으며, PDF �
 
 **https://bak2ya.github.io/PackDocFit/**
 
-PackDocFit은 정적 웹앱이며 PDF 파일 자체를 서버에 업로드하지 않습니다. 앱 실행에 필요한 오픈소스 MuPDF.js 모듈은 고정된 버전으로 로드됩니다. 웹 버전은 기존 Windows PDF Editor의 앱 아이콘을 함께 사용합니다.
+PackDocFit은 정적 웹앱이며 PDF 파일 자체를 서버에 업로드하지 않습니다. PDF 편집은 MuPDF.js가 담당하고, 화면 미리보기와 썸네일은 PDF.js가 담당합니다. 웹 버전은 기존 Windows PDF Editor의 앱 아이콘과 파일/페이지/미리보기 작업 구조를 이어갑니다.
 
 ### Windows 버전
 
@@ -116,7 +117,7 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 - Merge, extract, delete, copy, cut and paste pages
 - Rotate and resize pages
 - Fit pages to a reference width or standard paper sizes
-- Continuous, multi-column and single-page viewing
+- Continuous viewing matching the Windows workflow, adaptive multi-column viewing when zoomed out, and single-page viewing
 - PDF text-layer selection and copy (no OCR)
 - Highlight, rectangle, line, arrow, freehand ink and text annotations
 - Move, resize, restyle and delete annotations
@@ -129,6 +130,7 @@ Your PDF and image files are not uploaded to a PackDocFit server. PDF processing
 - Korean / English / Japanese / Spanish UI
 - Light / dark / system theme
 - Resizable Files / Pages split and resizable sidebar / preview workspace
+- Page-thumbnail-focused sidebar and central PDF preview modeled after the Windows build
 - Settings import and export
 - About window with developer email, GitHub, Windows download, and an in-app usage guide
 
@@ -138,7 +140,7 @@ No installation is required:
 
 **https://bak2ya.github.io/PackDocFit/**
 
-PackDocFit is a static web app. Your documents stay in your browser. A pinned open-source MuPDF.js module is loaded to provide the PDF engine. The web build reuses the app icon from the original Windows PDF Editor.
+PackDocFit is a static web app. Your documents stay in your browser. MuPDF.js handles PDF editing, while PDF.js renders the page thumbnails and document preview. The web build reuses the app icon and the Files / Pages / Preview workflow from the original Windows PDF Editor.
 
 ### Windows version
 
@@ -202,7 +204,8 @@ npm run preview
 
 - JavaScript / HTML / CSS
 - Vite
-- MuPDF.js / WebAssembly
+- MuPDF.js / WebAssembly — editing, page operations, annotations, save
+- Mozilla PDF.js — thumbnails and document preview rendering
 - Browser File APIs, Web Crypto and localStorage
 
 ## License
